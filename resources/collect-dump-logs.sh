@@ -24,7 +24,7 @@ if [ ! -z $RUNNING ]; then
     tar zcvf jvb-dumps-${STAMP}-${PID}.tgz ${THREADS_FILE} ${HEAP_FILE} /var/log/jitsi/jvb.log
     rm ${HEAP_FILE} ${THREADS_FILE}
 else
-    ls $JAVA_HEAPDUMP_PATH >/dev/null 2>&1
+    ls $JVB_HEAPDUMP_PATH >/dev/null 2>&1
     if [ $? -eq 0 ]; then
         echo "JVB not running, but previous heap dump found."
         tar zcvf jvb-dumps-${STAMP}-crash.tgz $JVB_HEAPDUMP_PATH /var/log/jitsi/jvb.log
