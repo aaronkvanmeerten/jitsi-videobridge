@@ -24,6 +24,7 @@ import org.jitsi.impl.neomedia.transform.srtp.*;
 import org.jitsi.meet.*;
 import org.jitsi.service.configuration.*;
 import org.jitsi.service.neomedia.*;
+import org.jitsi.service.packetlogging.*;
 import org.jitsi.util.*;
 
 /**
@@ -73,10 +74,11 @@ public class JvbBundleConfig
             "net/java/sip/communicator/service/protocol/media/ProtocolMediaActivator"
         },
         {
-            "org/jitsi/videobridge/influxdb/Activator"
+            "org/jitsi/videobridge/eventadmin/influxdb/Activator",
+            "org/jitsi/videobridge/eventadmin/callstats/Activator"
         },
         {
-            "org/jitsi/videobridge/metrics/MetricLoggingActivator"
+            "org/jitsi/videobridge/eventadmin/metrics/MetricLoggingActivator"
         },
         {
             "org/jitsi/videobridge/VideobridgeBundleActivator"
@@ -224,9 +226,13 @@ public class JvbBundleConfig
         // We want them forwarded as normal packets.
         defaults.put(AudioMediaStream.DISABLE_DTMF_HANDLING_PNAME, true_);
 
-        // This will eventually be enabled by default, but keep it off until
-        // more testing.
-        defaults.put(VideoMediaStream.REQUEST_RETRANSMISSIONS_PNAME, false_);
+        // Enable retransmission requests for video streams.
+        defaults.put(VideoMediaStream.REQUEST_RETRANSMISSIONS_PNAME, true_);
+
+        // Disable packet logging.
+        defaults.put(
+                PacketLoggingConfiguration.PACKET_LOGGING_ENABLED_PROPERTY_NAME,
+                false_);
 
         // This causes RTP/RTCP packets received before the DTLS agent is ready
         // to decrypt them to be dropped. Without it, these packets are passed

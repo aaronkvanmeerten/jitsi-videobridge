@@ -26,10 +26,10 @@ import javax.media.rtp.*;
 import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
 import net.java.sip.communicator.impl.protocol.jabber.extensions.jingle.*;
 
+import org.ice4j.util.*;
 import org.jitsi.impl.neomedia.*;
 import org.jitsi.impl.neomedia.rtcp.*;
 import org.jitsi.impl.neomedia.rtcp.termination.strategies.*;
-import org.jitsi.impl.neomedia.rtp.remotebitrateestimator.*;
 import org.jitsi.impl.neomedia.transform.*;
 import org.jitsi.service.configuration.*;
 import org.jitsi.service.neomedia.*;
@@ -90,6 +90,23 @@ public class VideoChannel
      * or -1 if none is configured (the other end does not support VP8).
      */
     private byte vp8PayloadType = -1;
+
+
+    /**
+     * XXX Defaulting to the lowest-quality simulcast stream until we are
+     * explicitly told to switch to a higher-quality simulcast stream is one way
+     * to go, of course. But such a default presents the problem that a remote
+     * peer will see the lowest quality possible for a noticeably long period of
+     * time because its command to switch to the highest quality possible can
+     * only come via its data/SCTP channel and that may take a very (and
+     * unpredictably) long time to set up. That is why we may default to the
+     * highest-quality simulcast stream here.
+     *
+     * This value can be set through colibri channel IQ with
+     * receive-simulcast-layer attribute.
+     */
+    private int receiveSimulcastLayer
+            = SimulcastStream.SIMULCAST_LAYER_ORDER_BASE; // Integer.MAX_VALUE;
 
     /**
      * Updates the values of the property <tt>inLastN</tt> of all
@@ -184,7 +201,7 @@ public class VideoChannel
     {
         super(content, id, channelBundleId, transportNamespace, initiator);
 
-        setTransformEngine(new RtpChannelTransformEngine(this));
+        initializeTransformerEngine();
 
         ConfigurationService cfg
             = content.getConference().getVideobridge()
@@ -204,7 +221,14 @@ public class VideoChannel
     public void initialize()
         throws IOException
     {
-        super.initialize();
+        initialize(null);
+    }
+
+    @Override
+    void initialize(RTPLevelRelayType rtpLevelRelayType)
+        throws IOException
+    {
+        super.initialize(rtpLevelRelayType);
 
         ConfigurationService cfg
             = getContent().getConference().getVideobridge()
@@ -368,6 +392,19 @@ public class VideoChannel
         return lastNController.getLastN();
     }
 
+    public int getReceiveSimulcastLayer()
+    {
+        return  receiveSimulcastLayer;
+    }
+
+    public void setReceiveSimulcastLayer(Integer receiveSimulcastLayer)
+    {
+        if (receiveSimulcastLayer != null)
+        {
+            this.receiveSimulcastLayer = receiveSimulcastLayer;
+        }
+    }
+
     /**
      * Notifies this <tt>VideoChannel</tt> that the value of its property
      * <tt>inLastN</tt> has changed from <tt>oldValue</tt> to <tt>newValue</tt>.
@@ -492,7 +529,9 @@ public class VideoChannel
             {
                 lastNController.initializeConferenceEndpoints();
                 sendLastNEndpointsChangeEventOnDataChannel(
-                        lastNController.getForwardedEndpoints(), null);
+                        lastNController.getForwardedEndpoints(),
+                        null,
+                        null);
             }
 
             updateInLastN(this);
@@ -525,7 +564,8 @@ public class VideoChannel
      */
     public void sendLastNEndpointsChangeEventOnDataChannel(
             List<String> forwardedEndpoints,
-            List<String> endpointsEnteringLastN)
+            List<String> endpointsEnteringLastN,
+            List<String> conferenceEndpoints)
     {
         Endpoint thisEndpoint = getEndpoint();
 
@@ -553,6 +593,10 @@ public class VideoChannel
             // endpointsEnteringLastN
             msg.append(",\"endpointsEnteringLastN\":");
             msg.append(getJsonString(endpointsEnteringLastN));
+
+            // conferenceEndpoints
+            msg.append(",\"conferenceEndpoints\":");
+            msg.append(getJsonString(conferenceEndpoints));
         }
         msg.append('}');
 
@@ -715,7 +759,6 @@ public class VideoChannel
             if (Constants.RED.equals(payloadType.getName()))
             {
                 enableRedFilter = false;
-                break;
             }
 
             if (Constants.VP8.equalsIgnoreCase(payloadType.getName()))
@@ -902,10 +945,8 @@ public class VideoChannel
         SimulcastEngine simulcastEngine
             = getTransformEngine().getSimulcastEngine();
 
-        Map<Long, SimulcastStream> ssrc2stream = new HashMap<>();
-
         // Build the simulcast streams.
-        SimulcastStream[] simulcastStreams = null;
+        long[][] simulcastTriplets = null;
         for (SourceGroupPacketExtension sourceGroup : sourceGroups)
         {
             List<SourcePacketExtension> sources = sourceGroup.getSources();
@@ -918,29 +959,57 @@ public class VideoChannel
             }
 
             // sources are in low to high order.
-            simulcastStreams = new SimulcastStream[sources.size()];
+            simulcastTriplets = new long[sources.size()][];
             for (int i = 0; i < sources.size(); i++)
             {
                 SourcePacketExtension source = sources.get(i);
-                Long primarySSRC = source.getSSRC();
-                SimulcastStream simulcastStream = new SimulcastStream(
-                    simulcastEngine.getSimulcastReceiver(), primarySSRC, i);
-
-                // Add the stream to the reverse map.
-                ssrc2stream.put(primarySSRC, simulcastStream);
-
-                // Add the stream to the sorted set.
-                simulcastStreams[i] = simulcastStream;
+                // FIXME we need an INVALID_SSRC constant.
+                simulcastTriplets[i] = new long[] { source.getSSRC(), -1, -1 };
             }
+        }
 
+        if (simulcastTriplets == null || simulcastTriplets.length == 0)
+        {
+            return;
         }
 
         // FID groups have been saved in RtpChannel. Make sure any changes are
         // propagated to the appropriate SimulcastStream-s.
-        for (Map.Entry<Long, Long> entry : this.fidSourceGroups.entrySet())
+        if (this.fidSourceGroups != null && this.fidSourceGroups.size() != 0)
         {
-            SimulcastStream simulcastStream = ssrc2stream.get(entry.getKey());
-            simulcastStream.setRTXSSRC(entry.getValue());
+            for (Map.Entry<Long, Long> entry : this.fidSourceGroups.entrySet())
+            {
+                if (entry.getKey() == null || entry.getValue() == null)
+                {
+                    continue;
+                }
+
+                // autoboxing.
+                long primarySSRC = entry.getKey();
+                long fidSSRC = entry.getValue();
+
+                for (int i = 0; i < simulcastTriplets.length; i++)
+                {
+                    if (simulcastTriplets[i][0] == primarySSRC)
+                    {
+                        simulcastTriplets[i][1] = fidSSRC;
+                        break;
+                    }
+                }
+            }
+        }
+
+        SimulcastStream[] simulcastStreams
+            = new SimulcastStream[simulcastTriplets.length];
+
+        for (int i = 0; i < simulcastTriplets.length; i++)
+        {
+            simulcastStreams[i] = new SimulcastStream(
+                simulcastEngine.getSimulcastReceiver(),
+                simulcastTriplets[i][0],
+                simulcastTriplets[i][1],
+                simulcastTriplets[i][2],
+                i);
         }
 
         simulcastEngine
@@ -1001,27 +1070,25 @@ public class VideoChannel
     }
 
     /**
-     * Updates the view that this <tt>VideoChanel</tt> has of all the translated
-     * <tt>VideoChannel</tt>s.
+     * Updates the simulcast-related configuration of this {@link VideoChannel}
+     * with the current state of all other channels in its {@link Content}.
      */
     public void updateTranslatedVideoChannels()
     {
         logger.debug("Updating the translated channels.");
         for (Channel peerVideoChannel : getContent().getChannels())
         {
-            if (!(peerVideoChannel instanceof VideoChannel))
+            if (peerVideoChannel instanceof VideoChannel
+                    && !equals(peerVideoChannel))
             {
-                logger.warn("Er, what? I Taw a Putty Tat.");
-                continue;
+                updateTranslatedVideoChannel((VideoChannel) peerVideoChannel);
             }
-
-            updateTranslatedVideoChannel((VideoChannel) peerVideoChannel);
         }
     }
 
     /**
-     * Updates the view that this <tt>VideoChannel</tt> has of the translated
-     * peer <tt>VideoChannel</tt>.
+     * Updates the simulcast-related configuration of this {@link VideoChannel}
+     * with the current state of {@code peerVideoChannel}.
      *
      * @param peerVideoChannel
      */
@@ -1111,8 +1178,8 @@ public class VideoChannel
             peerVideoChannel.getStream().getDynamicRTPPayloadTypes().entrySet())
         {
             Byte pt = entry.getKey();
-            MediaFormat format = entry.getValue();
-            if (Constants.RED.equals(format.getEncoding()))
+            String encoding = entry.getValue().getEncoding();
+            if (Constants.RED.equals(encoding))
             {
                 for (Integer ssrc : ssrcGroup)
                 {
@@ -1124,8 +1191,7 @@ public class VideoChannel
                     ssrc2red.put(ssrc, pt);
                 }
             }
-
-            if (Constants.ULPFEC.equals(entry.getValue().getEncoding()))
+            else if (Constants.ULPFEC.equals(encoding))
             {
                 for (Integer ssrc : ssrcGroup)
                 {

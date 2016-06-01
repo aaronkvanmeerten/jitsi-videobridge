@@ -65,6 +65,11 @@ public class CallStatsIOTransport
     private CallStats callStats;
 
     /**
+     * CallStats service registration.
+     */
+    private ServiceRegistration<CallStats> serviceRegistration;
+
+    /**
      * {@inheritDoc}
      */
     @Override
@@ -108,6 +113,12 @@ public class CallStatsIOTransport
      */
     private void callStatsOnInitialized(CallStats callStats, String msg)
     {
+        // callstats get re-initialized every few hours, which
+        // can leads to registering callstats in osgi many times, while
+        // the service instance is the same
+        if(serviceRegistration != null)
+            return;
+
         bridgeStatusInfoBuilder = new BridgeStatusInfoBuilder();
 
         if (logger.isDebugEnabled())
@@ -116,6 +127,12 @@ public class CallStatsIOTransport
                     "callstats.io Java library initialized successfully"
                         + " with message: " + msg);
         }
+
+        serviceRegistration
+            = getBundleContext().registerService(
+                    CallStats.class,
+                    callStats,
+                    null);
     }
 
     /**
@@ -160,6 +177,12 @@ public class CallStatsIOTransport
      */
     private void dispose(BundleContext bundleContext)
     {
+        if (serviceRegistration != null)
+        {
+            serviceRegistration.unregister();
+            serviceRegistration = null;
+        }
+
         bridgeStatusInfoBuilder = null;
         callStats = null;
     }

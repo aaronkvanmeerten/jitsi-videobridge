@@ -30,6 +30,7 @@ import net.sf.fmj.media.rtp.*;
 import net.sf.fmj.media.rtp.RTPHeader;
 
 import org.ice4j.socket.*;
+import org.jitsi.eventadmin.*;
 import org.jitsi.impl.neomedia.*;
 import org.jitsi.impl.neomedia.rtp.translator.*;
 import org.jitsi.impl.neomedia.transform.*;
@@ -42,7 +43,6 @@ import org.jitsi.service.neomedia.format.*;
 import org.jitsi.service.neomedia.recording.*;
 import org.jitsi.util.Logger;
 import org.jitsi.util.event.*;
-import org.jitsi.eventadmin.*;
 import org.jitsi.videobridge.transform.*;
 import org.jitsi.videobridge.xmpp.*;
 
@@ -75,6 +75,11 @@ public class RtpChannel
      * of garbage collection.
      */
     private static final long[] NO_RECEIVE_SSRCS = new long[0];
+
+    /**
+     * The maximum number of SSRCs to accept on this channel. RTP packets arriving
+     */
+    private static final int MAX_RECEIVE_SSRCS = 50;
 
     /**
      * Gets the <tt>Channel</tt> which uses a specific <tt>MediaStream</tt>.
@@ -156,7 +161,13 @@ public class RtpChannel
      * <tt>RtpChannel</tt>. So in theory we should be able to get rid of one of
      * the two. TAG(cat4-remote-ssrc-hurricane).
      */
-    long[] receiveSSRCs = NO_RECEIVE_SSRCS;
+    private long[] receiveSSRCs = NO_RECEIVE_SSRCS;
+
+    /**
+     * The object used to synchronize access to {@link #receiveSSRCs} and
+     * {@link #signaledSSRCs}.
+     */
+    private final Object receiveSSRCsSyncRoot = new Object();
 
     /**
      * The type of RTP-level relay (in the terms specified by RFC 3550
@@ -279,7 +290,7 @@ public class RtpChannel
          * synchronization source identifier (SSRC), which Jitsi Videobridge
          * pre-announces.
          */
-        initialLocalSSRC = Videobridge.RANDOM.nextLong() & 0xffffffffl;
+        initialLocalSSRC = Videobridge.RANDOM.nextLong() & 0xffffffffL;
 
         conferenceSpeechActivity
             = getContent().getConference().getSpeechActivity();
@@ -493,7 +504,19 @@ public class RtpChannel
                      * to the focus by the Jitsi Videobridge server.
                      */
                     int ssrc = RTPTranslatorImpl.readInt(data, off + 8);
-                    boolean notify = addReceiveSSRC(ssrc);
+                    boolean notify;
+
+                    try
+                    {
+                        notify = addReceiveSSRC(ssrc, true);
+                    }
+                    catch (SizeExceededException see)
+                    {
+                        // Drop the packet and do *not* trigger signalling
+                        // because of it.
+                        accept = false;
+                        notify = false;
+                    }
 
                     /*
                      * If a new SSRC has been detected on this channel, and a
@@ -516,7 +539,7 @@ public class RtpChannel
                                 if (synchronizer != null)
                                 {
                                     synchronizer.setEndpoint(
-                                            ssrc & 0xffffffffl,
+                                            ssrc & 0xffffffffL,
                                             endpoint.getID());
                                 }
                             }
@@ -537,14 +560,16 @@ public class RtpChannel
                         if (payloadTypes != null)
                         {
                             int pt = data[off + 1] & 0x7f;
-                            MediaFormat format
-                                = payloadTypes.get(Byte.valueOf((byte) pt));
+                            MediaFormat format = payloadTypes.get((byte) pt);
 
                             if ((format != null)
                                     && !format.equals(stream.getFormat()))
                             {
                                 stream.setFormat(format);
-                                stream.setDirection(MediaDirection.SENDRECV);
+                                synchronized (streamSyncRoot)
+                                {   // otherwise races with stream.start()
+                                    stream.setDirection(MediaDirection.SENDRECV);
+                                }
                                 notify = true;
                             }
                         }
@@ -567,11 +592,22 @@ public class RtpChannel
      *
      * @param receiveSSRC the RTP SSRC to be added to the list of SSRCs received
      * on this <tt>Channel</tt>
+     * @param checkLimit whether to check whether the number of receive SSRCs
+     * for the channel exceed the limit ({@link #MAX_RECEIVE_SSRCS}).
      * @return <tt>true</tt> if <tt>receiveSSRC</tt> was added to the list
      * (i.e. was not previously there); otherwise, <tt>false</tt>
+     * @throws org.jitsi.videobridge.RtpChannel.SizeExceededException if
+     * {@code checkLimit} is true and the number of SSRCs in {@link
+     * #receiveSSRCs} would have exceeded {@link #MAX_RECEIVE_SSRCS} with the
+     * addition of the new SSRC.
      */
-    private synchronized boolean addReceiveSSRC(int receiveSSRC)
+    private boolean addReceiveSSRC(int receiveSSRC,
+                                                boolean checkLimit)
+        throws SizeExceededException
     {
+        synchronized (receiveSSRCsSyncRoot)
+        {
+
         long now = System.currentTimeMillis();
 
         // contains
@@ -591,6 +627,11 @@ public class RtpChannel
             }
         }
 
+        if (checkLimit && length >= MAX_RECEIVE_SSRCS / 2)
+        {
+            throw new SizeExceededException();
+        }
+
         // add
         long[] newReceiveSSRCs = new long[length + 2];
 
@@ -600,6 +641,8 @@ public class RtpChannel
         receiveSSRCs = newReceiveSSRCs;
 
         return true;
+
+        } // synchronized (receiveSSRCsSyncRoot)
     }
 
     /**
@@ -629,7 +672,7 @@ public class RtpChannel
                 = getContent().getRTCPFeedbackMessageSender();
 
             if (rtcpFeedbackMessageSender != null)
-                rtcpFeedbackMessageSender.sendFIR(stream, receiveSSRCs);
+                rtcpFeedbackMessageSender.sendFIR(receiveSSRCs);
         }
     }
 
@@ -765,6 +808,14 @@ public class RtpChannel
      */
     public long getLastPacketsLostNB()
     {
+        // XXX The field stream is assigned to in #initialize(RTPLevelRelayType)
+        // but by that time this RtpChannel is already exposed through its
+        // Content.
+        MediaStream stream = this.stream;
+
+        if (stream == null)
+            return 0;
+
         long newPacketsLost = stream.getMediaStreamStats().getNbPacketsLost();
         long lastPacketsNB = newPacketsLost - lastKnownPacketsLostNB;
 
@@ -792,6 +843,14 @@ public class RtpChannel
      */
     public long getLastPacketsNB()
     {
+        // XXX The field stream is assigned to in #initialize(RTPLevelRelayType)
+        // but by that time this RtpChannel is already exposed through its
+        // Content.
+        MediaStream stream = this.stream;
+
+        if (stream == null)
+            return 0;
+
         long newPackets = stream.getMediaStreamStats().getNbPackets();
         long lastPacketsNB = newPackets - lastKnownPacketsNB;
 
@@ -828,9 +887,18 @@ public class RtpChannel
      */
     public long getNBReceivedBytes()
     {
-        long bytes = 0;
+        // XXX The field stream is assigned to in #initialize(RTPLevelRelayType)
+        // but by that time this RtpChannel is already exposed through its
+        // Content.
+        MediaStream stream = this.stream;
+
+        if (stream == null)
+            return 0;
+
         long newBytes = stream.getMediaStreamStats().getNbReceivedBytes();
-        if(newBytes > lastKnownReceivedBytes)
+        long bytes = 0;
+
+        if (newBytes > lastKnownReceivedBytes)
         {
             bytes += newBytes - lastKnownReceivedBytes;
             lastKnownReceivedBytes = newBytes;
@@ -851,11 +919,18 @@ public class RtpChannel
      */
     public long getNBSentBytes()
     {
-        long bytes = 0;
+        // XXX The field stream is assigned to in #initialize(RTPLevelRelayType)
+        // but by that time this RtpChannel is already exposed through its
+        // Content.
+        MediaStream stream = this.stream;
+
+        if (stream == null)
+            return 0;
 
         long newBytes = stream.getMediaStreamStats().getNbSentBytes();
+        long bytes = 0;
 
-        if(newBytes > lastKnownSentBytes)
+        if (newBytes > lastKnownSentBytes)
         {
             bytes += newBytes - lastKnownSentBytes;
             lastKnownSentBytes = newBytes;
@@ -870,9 +945,11 @@ public class RtpChannel
      * @return an array of <tt>int</tt>s which represents a list of the RTP
      * SSRCs received on this <tt>Channel</tt>
      */
-    public synchronized int[] getReceiveSSRCs()
+    public int[] getReceiveSSRCs()
     {
-        final int length = this.receiveSSRCs.length;
+        // this.receiveSSRCs is copy-on-write.
+        long[] receiveSSRCsField = this.receiveSSRCs;
+        int length = receiveSSRCsField.length;
 
         if (length == 0)
         {
@@ -883,7 +960,9 @@ public class RtpChannel
             int[] receiveSSRCs = new int[length / 2];
 
             for (int src = 0, dst = 0; src < length; src += 2, dst++)
-                receiveSSRCs[dst] = (int) this.receiveSSRCs[src];
+            {
+                receiveSSRCs[dst] = (int) receiveSSRCsField[src];
+            }
             return receiveSSRCs;
         }
     }
@@ -946,6 +1025,12 @@ public class RtpChannel
     public void initialize()
         throws IOException
     {
+        initialize(null);
+    }
+
+    void initialize(RTPLevelRelayType rtpLevelRelayType)
+        throws IOException
+    {
         super.initialize();
 
         MediaService mediaService = getMediaService();
@@ -968,6 +1053,21 @@ public class RtpChannel
             if (transformEngine != null)
                 stream.setExternalTransformer(transformEngine);
 
+            /*
+             * The attribute rtp-level-relay-type specifies the
+             * vale of pretty much the most important Channel
+             * property given that Jitsi Videobridge implements
+             * an RTP-level relay. Consequently, it is
+             * intuitively a sign of common sense to take the
+             * value into account as possible.
+             *
+             * The attribute rtp-level-relay-type is optional.
+             * If a value is not specified, then the Channel
+             * rtpLevelRelayType is to not be changed.
+             */
+            if (rtpLevelRelayType != null)
+                setRTPLevelRelayType(rtpLevelRelayType);
+
             // The transport manager could be already connected, in which case
             // (since we just created the stream), any previous calls to
             // transportConnected() have failed started the stream. So trigger
@@ -978,6 +1078,22 @@ public class RtpChannel
                 transportConnected();
             }
         }
+    }
+
+    /**
+     * Initializes the <tt>RtpChannelTransformEngine</tt> that will be used by
+     * this <tt>RtpChannel</tt>.
+     *
+     * @return the just created <tt>RtpChannelTransformEngine</tt> instance.
+     */
+    RtpChannelTransformEngine initializeTransformerEngine()
+    {
+        transformEngine = new RtpChannelTransformEngine(this);
+        if (stream != null)
+        {
+            stream.setExternalTransformer(transformEngine);
+        }
+        return transformEngine;
     }
 
     /**
@@ -1001,40 +1117,45 @@ public class RtpChannel
                 return;
         }
 
-        // connector
-        StreamConnector connector = getStreamConnector();
+        RetransmissionRequester retransmissionRequester
+            = stream.getRetransmissionRequester();
+        if (retransmissionRequester != null)
+            retransmissionRequester.setSenderSsrc(getContent().getInitialLocalSSRC());
 
-        if (connector == null)
-            return;
-        else
-            stream.setConnector(connector);
-
-        // target
         MediaStreamTarget streamTarget = createStreamTarget();
+        StreamConnector connector = getStreamConnector();
+        if (connector == null)
+        {
+            logger.info("Not starting stream, connector is null");
+            return;
+        }
 
         if (streamTarget != null)
         {
             InetSocketAddress dataAddr = streamTarget.getDataAddress();
-
-            if (dataAddr != null)
+            if (dataAddr == null)
             {
-                this.streamTarget.setDataHostAddress(dataAddr.getAddress());
-                this.streamTarget.setDataPort(dataAddr.getPort());
+                logger.info(
+                        "Not starting stream, the target's data address is null");
+                return;
             }
 
-            InetSocketAddress ctrlAddr = streamTarget.getControlAddress();
+            this.streamTarget.setDataHostAddress(dataAddr.getAddress());
+            this.streamTarget.setDataPort(dataAddr.getPort());
 
+            InetSocketAddress ctrlAddr = streamTarget.getControlAddress();
             if (ctrlAddr != null)
             {
                 this.streamTarget.setControlHostAddress(ctrlAddr.getAddress());
                 this.streamTarget.setControlPort(ctrlAddr.getPort());
             }
 
-            if (dataAddr != null)
-                stream.setTarget(streamTarget);
+            stream.setTarget(streamTarget);
         }
+        stream.setConnector(connector);
 
         Content content = getContent();
+        Conference conference = content.getConference();
 
         if (!stream.isStarted())
         {
@@ -1048,16 +1169,14 @@ public class RtpChannel
             if (RTPLevelRelayType.MIXER.equals(getRTPLevelRelayType()))
                 stream.setSSRCFactory(new SSRCFactoryImpl(initialLocalSSRC));
 
-            stream.start();
-
-            Videobridge videobridge
-                = getContent().getConference().getVideobridge();
-            EventAdmin eventAdmin = videobridge.getEventAdmin();
-            if (eventAdmin != null && streamTarget != null)
+            synchronized (streamSyncRoot) // Otherwise, races with stream.setDirection().
             {
-                eventAdmin
-                    .sendEvent(EventFactory.streamStarted(this));
+                stream.start();
             }
+
+            EventAdmin eventAdmin = conference.getEventAdmin();
+            if (eventAdmin != null)
+                eventAdmin.sendEvent(EventFactory.streamStarted(this));
         }
 
         if (logger.isTraceEnabled())
@@ -1065,7 +1184,7 @@ public class RtpChannel
             logger.trace(
                     "Direction of channel " + getID() + " of content "
                         + content.getName() + " of conference "
-                        + content.getConference().getID() + " is "
+                        + conference.getID() + " is "
                         + stream.getDirection() + ".");
         }
 
@@ -1180,10 +1299,14 @@ public class RtpChannel
      * @return <tt>true</tt> if <tt>receiveSSRC</tt> was found in the list of
      * SSRCs received on this <tt>Channel</tt>; otherwise, <tt>false</tt>
      */
-    private synchronized boolean removeReceiveSSRC(int receiveSSRC)
+    private boolean removeReceiveSSRC(int receiveSSRC)
     {
-        final int length = receiveSSRCs.length;
         boolean removed = false;
+
+        synchronized (receiveSSRCsSyncRoot)
+        {
+
+        final int length = receiveSSRCs.length;
 
         if (length == 2)
         {
@@ -1221,6 +1344,8 @@ public class RtpChannel
                 }
             }
         }
+
+        } // synchronized (receiveSSRCsSyncRoot)
 
         return removed;
     }
@@ -1409,7 +1534,7 @@ public class RtpChannel
                 redPayloadType = -1;
                 for (PayloadTypePacketExtension ext : payloadTypes)
                 {
-                    if ("rtx".equalsIgnoreCase(ext.getName()))
+                    if (Constants.RTX.equalsIgnoreCase(ext.getName()))
                     {
                         rtxPayloadType = (byte) ext.getID();
                         for (ParameterPacketExtension ppe : ext.getParameters())
@@ -1425,6 +1550,14 @@ public class RtpChannel
                     {
                         redPayloadType = (byte) ext.getID();
                     }
+                }
+
+                RetransmissionRequester retransmissionRequester
+                    = stream.getRetransmissionRequester();
+                if (retransmissionRequester != null)
+                {
+                    retransmissionRequester.configureRtx(rtxPayloadType,
+                                                         fidSourceGroups);
                 }
             }
         }
@@ -1700,12 +1833,13 @@ public class RtpChannel
      * used as the input in the update of the Sets the <tt>Set</tt> of the SSRCs
      * that this <tt>RtpChannel</tt> has signaled.
      */
-    public synchronized void setSources(List<SourcePacketExtension> sources)
+    public void setSources(List<SourcePacketExtension> sources)
     {
         if (sources == null || sources.isEmpty())
-        {
             return;
-        }
+
+        synchronized (receiveSSRCsSyncRoot)
+        {
 
         Set<Integer> oldSignaledSSRCs = new HashSet<>(signaledSSRCs);
 
@@ -1713,11 +1847,9 @@ public class RtpChannel
         Set<Integer> newSignaledSSRCs = new HashSet<>();
         for (SourcePacketExtension source : sources)
         {
-            int ssrc = (int) source.getSSRC();
+            long ssrc = source.getSSRC();
             if (ssrc != -1)
-            {
-                newSignaledSSRCs.add((int) source.getSSRC());
-            }
+                newSignaledSSRCs.add((int) ssrc);
         }
 
         // Add the added SSRCs.
@@ -1727,7 +1859,16 @@ public class RtpChannel
         {
             for (Integer addedSSRC : addedSSRCs)
             {
-                addReceiveSSRC(addedSSRC);
+                try
+                {
+                    // Do allow the number of explicitly signalled SSRCs to
+                    // exceed the limit.
+                    addReceiveSSRC(addedSSRC, false);
+                }
+                catch (SizeExceededException see)
+                {
+                    // Never thrown with checkLimit=false.
+                }
             }
         }
 
@@ -1736,13 +1877,13 @@ public class RtpChannel
         if (!oldSignaledSSRCs.isEmpty())
         {
             for (Integer removedSSRC : oldSignaledSSRCs)
-            {
                 removeReceiveSSRC(removedSSRC);
-            }
         }
 
         // Set the newly signaled ssrcs.
         signaledSSRCs = newSignaledSSRCs;
+
+        } // synchronized (receiveSSRCsSyncRoot)
 
         touch(); // It seems this Channel is still active.
     }
@@ -1794,6 +1935,15 @@ public class RtpChannel
                 fidSourceGroups.put(first, second);
             }
         }
+
+        // The RTX configuration (PT and SSRC maps) may have changed.
+        RetransmissionRequester retransmissionRequester
+            = stream.getRetransmissionRequester();
+        if (retransmissionRequester != null)
+        {
+            retransmissionRequester.configureRtx(rtxPayloadType,
+                                                 fidSourceGroups);
+        }
     }
 
     /**
@@ -1805,21 +1955,6 @@ public class RtpChannel
     public int[] getReceivePTs()
     {
         return receivePTs;
-    }
-
-    /**
-     * Sets the <tt>RtpChannelTransformEngine</tt> to be used by this
-     * <tt>RtpChannel</tt>.
-     * @param transformEngine the <tt>RtpChannelTransformEngine</tt> to set.
-     */
-    void setTransformEngine(RtpChannelTransformEngine transformEngine)
-    {
-        if (this.transformEngine != transformEngine)
-        {
-            this.transformEngine = transformEngine;
-            if (stream != null)
-                stream.setExternalTransformer(transformEngine);
-        }
     }
 
     /**
@@ -1914,4 +2049,34 @@ public class RtpChannel
     {
         return conferenceSpeechActivity;
     }
+
+    /**
+     * Sets a delay of the RTP stream expressed in a number of packets.
+     * The property is immutable which means than once set can not be changed
+     * later.
+     *
+     * *NOTE* that this delay is meant to be used only for audio and video
+     * synchronization tests and should never be used in production.
+     *
+     * @param packetDelay tells by how many packets RTP stream should be
+     * delayed. Will have effect only if greater than 0.
+     *
+     * @return <tt>true</tt> if the delay has been set or <tt>false</tt>
+     * otherwise.
+     */
+    public boolean setPacketDelay(int packetDelay)
+    {
+        RtpChannelTransformEngine engine = this.transformEngine;
+        if (engine == null)
+        {
+            engine = initializeTransformerEngine();
+        }
+        return engine.setPacketDelay(packetDelay);
+    }
+
+    /**
+     * An exception indicating that the maximum size of something was exceeded.
+     */
+    private static class SizeExceededException extends Exception
+    {}
 }

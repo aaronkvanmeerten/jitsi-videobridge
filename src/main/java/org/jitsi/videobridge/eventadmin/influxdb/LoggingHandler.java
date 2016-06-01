@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.jitsi.videobridge.influxdb;
+package org.jitsi.videobridge.eventadmin.influxdb;
 
 import org.ice4j.ice.*;
 import org.jitsi.influxdb.*;
@@ -487,28 +487,35 @@ public class LoggingHandler
         Conference conference = transportManager.getConference();
         if (conference == null)
         {
-            logger.debug("Could not log the transport created event " +
-                "because the conference is null.");
+            logger.debug(
+                    "Could not log the transport_created event"
+                        + " because the conference is null.");
             return;
         }
 
         Agent agent = transportManager.getAgent();
         if (agent == null)
         {
-            logger.debug("Could not log the transport created event " +
-                "because the agent is null.");
+            logger.debug(
+                    "Could not log the transport_created event"
+                        + " because the agent is null.");
             return;
         }
 
-        logEvent(new InfluxDBEvent("transport_created",
-            TRANSPORT_CREATED_COLUMNS,
-            new Object[]{
-                String.valueOf(transportManager.hashCode()),
-                conference.getID(),
-                transportManager.getNumComponents(),
-                agent.getLocalUfrag(),
-                Boolean.valueOf(transportManager.isControlling()).toString()
-            }));
+        logEvent(
+                new InfluxDBEvent(
+                        "transport_created",
+                        TRANSPORT_CREATED_COLUMNS,
+                        new Object[]
+                        {
+                            String.valueOf(transportManager.hashCode()),
+                            conference.getID(),
+                            transportManager.getNumComponents(),
+                            agent.getLocalUfrag(),
+                            Boolean
+                                .valueOf(transportManager.isControlling())
+                                    .toString()
+                        }));
     }
 
     /**

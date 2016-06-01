@@ -20,18 +20,20 @@ import java.util.regex.*;
 
 import net.java.sip.communicator.impl.protocol.jabber.extensions.*;
 import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
+import net.java.sip.communicator.impl.protocol.jabber.extensions.health.*;
 import net.java.sip.communicator.impl.protocol.jabber.extensions.jingle.*;
 import net.java.sip.communicator.service.shutdown.*;
 import net.java.sip.communicator.util.*;
 
 import org.ice4j.ice.harvest.*;
 import org.ice4j.stack.*;
+import org.jitsi.eventadmin.*;
 import org.jitsi.osgi.*;
 import org.jitsi.service.configuration.*;
+import org.jitsi.service.libjitsi.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.util.*;
 import org.jitsi.util.Logger;
-import org.jitsi.eventadmin.*;
 import org.jitsi.videobridge.health.*;
 import org.jitsi.videobridge.pubsub.*;
 import org.jitsi.videobridge.xmpp.*;
@@ -219,10 +221,37 @@ public class Videobridge
      * the conference focus which will own the new instance i.e. from whom
      * further/future requests to manage the new instance must come or they will
      * be ignored. Pass <tt>null</tt> to override this safety check.
+     * @param name world readable name of the conference to create.
      * @return a new <tt>Conference</tt> instance with an ID unique to the
      * <tt>Conference</tt> instances listed by this <tt>Videobridge</tt>
      */
-    public Conference createConference(String focus)
+    public Conference createConference(String focus, String name)
+    {
+        return this.createConference(focus, name, /* eventadmin */ true);
+    }
+
+    /**
+     * Initializes a new {@link Conference} instance with an ID unique to the
+     * <tt>Conference</tt> instances listed by this <tt>Videobridge</tt> and
+     * adds the new instance to the list of existing <tt>Conference</tt>
+     * instances. Optionally the new instance is owned by a specific conference
+     * focus i.e. further/future requests to manage the new instance must come
+     * from the specified <tt>focus</tt> or they will be ignored. If the focus
+     * is not specified this safety check is overridden.
+     *
+     * @param focus (optional) a <tt>String</tt> which specifies the JID of
+     * the conference focus which will own the new instance i.e. from whom
+     * further/future requests to manage the new instance must come or they will
+     * be ignored. Pass <tt>null</tt> to override this safety check.
+     * @param name world readable name of the conference to create.
+     * @param eventadmin {@code true} to enable support for the
+     * {@code eventadmin} package i.e. fire {@code Event}s through
+     * {@code EventAdmin}; otherwise, {@code false}
+     * @return a new <tt>Conference</tt> instance with an ID unique to the
+     * <tt>Conference</tt> instances listed by this <tt>Videobridge</tt>
+     */
+    public Conference createConference(
+        String focus, String name, boolean eventadmin)
     {
         Conference conference = null;
 
@@ -234,7 +263,13 @@ public class Videobridge
             {
                 if (!conferences.containsKey(id))
                 {
-                    conference = new Conference(this, id, focus);
+                    conference
+                        = new Conference(
+                                this,
+                                id,
+                                focus,
+                                name,
+                                eventadmin ? getEventAdmin() : null);
                     conferences.put(id, conference);
                 }
             }
@@ -521,13 +556,13 @@ public class Videobridge
     }
 
     /**
-     * Returns the <tt>LoggingService</tt> used by this
+     * Returns the <tt>EventAdmin</tt> instance (to be) used by this
      * <tt>Videobridge</tt>.
      *
-     * @return the <tt>LoggingService</tt> used by this
+     * @return the <tt>EventAdmin</tt> instance (to be) used by this
      * <tt>Videobridge</tt>.
      */
-    public EventAdmin getEventAdmin()
+    private EventAdmin getEventAdmin()
     {
         BundleContext bundleContext = getBundleContext();
 
@@ -609,7 +644,8 @@ public class Videobridge
             {
                 if (!isShutdownInProgress())
                 {
-                    conference = createConference(focus);
+                    conference
+                        = createConference(focus, conferenceIQ.getName());
                 }
                 else
                 {
@@ -640,10 +676,6 @@ public class Videobridge
         }
         else
         {
-            String name = conferenceIQ.getName();
-            if (name != null)
-                conference.setName(name);
-
             responseConferenceIQ = new ColibriConferenceIQ();
             conference.describeShallow(responseConferenceIQ);
 
@@ -740,7 +772,21 @@ public class Videobridge
                                     = content.createRtpChannel(
                                         channelBundleId,
                                         transportNamespace,
-                                        channelIQ.isInitiator());
+                                        channelIQ.isInitiator(),
+                                        channelIQ.getRTPLevelRelayType());
+
+                                if (channel instanceof VideoChannel)
+                                {
+                                    VideoChannel videoChannel
+                                        = (VideoChannel)channel;
+
+                                    Integer receiveSimulcastLayer =
+                                        channelIQ.getReceivingSimulcastLayer();
+
+                                    videoChannel.setReceiveSimulcastLayer(
+                                            receiveSimulcastLayer);
+                                }
+
                                 channelCreated = true;
                             }
                         }
@@ -772,24 +818,6 @@ public class Videobridge
                                     continue;
                             }
 
-                            /*
-                             * The attribute rtp-level-relay-type specifies the
-                             * vale of pretty much the most important Channel
-                             * property given that Jitsi Videobridge implements
-                             * an RTP-level relay. Consequently, it is
-                             * intuitively a sign of common sense to take the
-                             * value into account as possible.
-                             *
-                             * The attribute rtp-level-relay-type is optional.
-                             * If a value is not specified, then the Channel
-                             * rtpLevelRelayType is to not be changed.
-                             */
-                            RTPLevelRelayType rtpLevelRelayType
-                                = channelIQ.getRTPLevelRelayType();
-
-                            if (rtpLevelRelayType != null)
-                                channel.setRTPLevelRelayType(rtpLevelRelayType);
-
                             // endpoint
                             // The attribute endpoint is optional. If a value is
                             // not specified, then the Channel endpoint is to
@@ -818,6 +846,13 @@ public class Videobridge
                                     = channelIQ.getAdaptiveSimulcast();
                             if (adaptiveSimulcast != null)
                                 channel.setAdaptiveSimulcast(adaptiveSimulcast);
+
+                            // Packet delay - for automated testing purpose only
+                            Integer packetDelay = channelIQ.getPacketDelay();
+                            if (packetDelay != null)
+                            {
+                                channel.setPacketDelay(packetDelay);
+                            }
 
                             /*
                              * XXX The attribute initiator is optional. If a
@@ -878,12 +913,11 @@ public class Videobridge
 
                             EventAdmin eventAdmin;
                             if (channelCreated
-                                    && (eventAdmin = getEventAdmin())
-                                        != null)
+                                    && (eventAdmin = getEventAdmin()) != null)
 
                             {
                                 eventAdmin.sendEvent(
-                                    EventFactory.channelCreated(channel));
+                                        EventFactory.channelCreated(channel));
                             }
 
                             // XXX we might want to fire more precise events,
@@ -1238,11 +1272,10 @@ public class Videobridge
                     bundleContext,
                     ConfigurationService.class);
 
-        this.defaultProcessingOptions
+        defaultProcessingOptions
             = (cfg == null)
                 ? 0
                 : cfg.getInt(DEFAULT_OPTIONS_PROPERTY_NAME, 0);
-
         if (logger.isDebugEnabled())
         {
             logger.debug(
@@ -1343,11 +1376,38 @@ public class Videobridge
                 PubSubElementType.PUBLISH.getNamespace().getXmlns(),
                 new PubSubProvider());
 
+        // Health-check
+        providerManager.addIQProvider(
+                HealthCheckIQ.ELEMENT_NAME,
+                HealthCheckIQ.NAMESPACE,
+                new HealthCheckIQProvider());
+
+        this.bundleContext = bundleContext;
+
+        startIce4j(bundleContext, cfg);
+
+        // MediaService may take (non-trivial) time to initialize so initialize
+        // it as soon as possible, don't wait to initialize it after an
+        // RtpChannel is requested.
+        LibJitsi.getMediaService();
+    }
+
+    /**
+     * Implements the ice4j-related portion of {@link #start(BundleContext)}.
+     *
+     * @param bundleContext the {@code BundleContext} in which this
+     * {@code Videobridge} is to start
+     * @param cfg the {@code ConfigurationService} registered in
+     * {@code bundleContext}. Explicitly provided for the sake of performance.
+     */
+    private void startIce4j(
+            BundleContext bundleContext,
+            ConfigurationService cfg)
+    {
         // TODO Packet logging for ice4j is not supported at this time.
         StunStack.setPacketLogger(null);
 
         // Make all ice4j properties system properties.
-
         if (cfg != null)
         {
             List<String> ice4jPropertyNames
@@ -1380,8 +1440,6 @@ public class Videobridge
                         + " initialization.",
                     e);
         }
-
-        this.bundleContext = bundleContext;
     }
 
     /**
@@ -1397,12 +1455,24 @@ public class Videobridge
     }
 
     /**
-     * Returns an array that contains the total number of
-     * conferences/channels/video streams.
+     * Returns an array that contains the total number of conferences (at index
+     * 0), channels (at index 1) and video streams (at index 2).
+     *
+     * The "video streams" count is an estimation of the total number of
+     * video streams received or sent. It may not be exactly accurate, because
+     * we assume, for example, that all endpoints are sending video. It is a
+     * better representation of the level of usage of the bridge than simply
+     * the number of channels, because it takes into account the size of each
+     * conference.
+     *
+     * We return these three together to avoid looping through all conferences
+     * multiple times when all three values are needed.
+     *
      * @return an array that contains the total number of
-     * conferences/channels/video streams.
+     * conferences (at index 0), channels (at index 1) and video streams (at
+     * index 2).
      */
-    public int[] getConferenceMetrics()
+    public int[] getConferenceChannelAndStreamCount()
     {
         Conference[] conferences = getConferences();
         int conferenceCount = 0, channelCount = 0, streamCount = 0;
@@ -1442,27 +1512,19 @@ public class Videobridge
      * Returns a short string that contains the total number of
      * conferences/channels/video streams, for the purposes of logging.
      *
-     * The metric "video streams" is an estimation of the total number of
-     * video streams received or sent. It may not be exactly accurate, because
-     * we assume, for example, that all endpoints are sending video. It is a
-     * better representation of the level of usage of the bridge than simply
-     * the number of channels, because it takes into account the size of each
-     * conference.
-     *
-     * The calculations are performed ad-hoc to avoid looping through all
-     * components multiple times.
-     *
      * @return a short string that contains the total number of
      * conferences/channels/video streams, for the purposes of logging.
      */
     String getConferenceCountString()
     {
-        int[] metrics = getConferenceMetrics();
+        int[] metrics = getConferenceChannelAndStreamCount();
 
-        return
-            "The total number of conferences is now " + metrics[0]
-                + ", channels " + metrics[1] + ", video streams "
-                + metrics[1] + ".";
+        StringBuilder sb
+            = new StringBuilder("The total number of conferences is now ");
+        sb.append(metrics[0]).append(", channels ").append(metrics[1]);
+        sb.append(", video streams ").append(metrics[2]).append(".");
+
+        return sb.toString();
     }
 
     /**

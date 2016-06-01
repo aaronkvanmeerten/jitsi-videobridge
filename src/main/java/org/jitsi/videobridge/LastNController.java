@@ -214,7 +214,7 @@ public class LastNController
             // Since we have the lock anyway, call update() inside, so it
             // doesn't have to obtain it again. But keep the call to
             // askForKeyframes() outside.
-            if (!pinnedEndpoints.equals(newPinnedEndpointIds))
+            if (!equalAsSets(pinnedEndpoints, newPinnedEndpointIds))
             {
                 pinnedEndpoints
                         = Collections.unmodifiableList(newPinnedEndpointIds);
@@ -335,6 +335,9 @@ public class LastNController
     private synchronized List<String> speechActivityEndpointIdsChanged(
             List<String> endpointIds)
     {
+        // This comparison needs to care about order because you could have the same set of active endpoints,
+        //  but have one that moved from outside the last-n range to inside the last-n range, so there needs to
+        //  be an update.
         if (conferenceSpeechActivityEndpoints.equals(endpointIds))
         {
             if (logger.isDebugEnabled())
@@ -363,9 +366,16 @@ public class LastNController
     {
         if (this.adaptiveLastN != adaptiveLastN)
         {
-            if (adaptiveLastN && bitrateController == null)
+            if (adaptiveLastN && adaptiveSimulcast)
             {
-                bitrateController = new BitrateController(this, channel);
+                //adaptive LastN and adaptive simulcast cannot be used together.
+                logger.error("Not enabling adaptive lastN, because adaptive" +
+                                     " simulcast is in use.");
+                return;
+            }
+            else if (adaptiveLastN && bitrateController == null)
+            {
+                bitrateController = new LastNBitrateController(this, channel);
             }
 
             this.adaptiveLastN = adaptiveLastN;
@@ -382,9 +392,17 @@ public class LastNController
     {
         if (this.adaptiveSimulcast != adaptiveSimulcast)
         {
-            if (adaptiveSimulcast && bitrateController == null)
+            if (adaptiveSimulcast && adaptiveLastN)
             {
-                bitrateController = new BitrateController(this, channel);
+                //adaptive LastN and adaptive simulcast cannot be used together.
+                logger.error("Not enabling adaptive simulcast, because " +
+                             "adaptive lastN is in use.");
+                return;
+            }
+            else if (adaptiveSimulcast && bitrateController == null)
+            {
+                bitrateController
+                    = new AdaptiveSimulcastBitrateController(this, channel);
             }
 
             this.adaptiveSimulcast = adaptiveSimulcast;
@@ -494,8 +512,11 @@ public class LastNController
             }
         }
 
+        newForwardedEndpoints
+            = orderBy(newForwardedEndpoints, conferenceSpeechActivityEndpoints);
+
         List<String> enteringEndpoints;
-        if (forwardedEndpoints.equals(newForwardedEndpoints))
+        if (equalAsSets(forwardedEndpoints,newForwardedEndpoints))
         {
             // We want forwardedEndpoints != INITIAL_EMPTY_LIST
             forwardedEndpoints = newForwardedEndpoints;
@@ -527,9 +548,17 @@ public class LastNController
 
             if (lastN >= 0 || currentLastN >= 0)
             {
+                List<String> conferenceEndpoints
+                    = conferenceSpeechActivityEndpoints.
+                        subList(
+                            0,
+                            Math.min(
+                                lastN,
+                                conferenceSpeechActivityEndpoints.size()));
+
                 // TODO: we may want to do this asynchronously.
                 channel.sendLastNEndpointsChangeEventOnDataChannel(
-                        forwardedEndpoints, enteringEndpoints);
+                        forwardedEndpoints, enteringEndpoints, conferenceEndpoints);
             }
         }
 
@@ -731,5 +760,52 @@ public class LastNController
         askForKeyframes(endpointsToAskForKeyframe);
 
         return currentLastN;
+    }
+
+    /**
+     * @return true if and only if the two lists {@code l1} and {@code l2}
+     * contains the same elements (regardless of their order).
+     */
+    private boolean equalAsSets(List<?> l1, List<?> l2)
+    {
+        Set<Object> s1 = new HashSet<>();
+        s1.addAll(l1);
+        Set<Object> s2 = new HashSet<>();
+        s2.addAll(l2);
+
+        return s1.equals(s2);
+    }
+
+    /**
+     * Returns a list which consists of the elements of {@code toOrder}, with
+     * duplicates removed, and ordered by their appearance in {@code template}.
+     * If {@code toOrder} contains elements which do not appear in
+     * {@code template}, they are added to the end of the list, in their
+     * original order from {@code toOrder}.
+     * @param toOrder the list to order.
+     * @param template the list which specifies how to order the elements of
+     * {@code toOrder}.
+     */
+    private List<String> orderBy(List<String> toOrder, List<String> template)
+    {
+        if (template == null || template.isEmpty())
+            return toOrder;
+
+        List<String> result = new LinkedList<>();
+        for (String s : template)
+        {
+            if (toOrder.contains(s) && !result.contains(s))
+                result.add(s);
+            if (result.size() == toOrder.size())
+                break;
+        }
+
+        for (String s : toOrder)
+        {
+            if (!result.contains(s))
+                result.add(s);
+        }
+
+        return result;
     }
 }

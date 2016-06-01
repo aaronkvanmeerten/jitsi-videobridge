@@ -39,7 +39,8 @@ public class Health
     /**
      * The {@link MediaType}s of {@link RtpChannel}s supported by
      * {@link Videobridge}. For example, {@link MediaType#DATA} is not supported
-     * by {@link Content#createRtpChannel(String, String, Boolean)}.
+     * by {@link
+     * Content#createRtpChannel(String, String, Boolean, RTPLevelRelayType)}.
      */
     private static final MediaType[] MEDIA_TYPES
         = { MediaType.AUDIO, MediaType.VIDEO };
@@ -95,23 +96,27 @@ public class Health
                     = content.createRtpChannel(
                             channelBundleId,
                             /* transportNamespace */ null,
-                            initiator);
+                            initiator,
+                            null);
 
                 // Fail as quickly as possible.
                 if (rtpChannel == null)
                     throw new NullPointerException();
+            }
 
-                // SctpConnection
-                SctpConnection sctpConnection
-                    = content.createSctpConnection(
-                            endpoint,
-                            /* sctpPort */ RANDOM.nextInt(),
-                            channelBundleId,
-                            initiator);
+            // SctpConnection
+            Content dataContent = conference.getOrCreateContent("data");
+            SctpConnection sctpConnection
+                = dataContent.createSctpConnection(
+                        endpoint,
+                        /* sctpPort */ RANDOM.nextInt(),
+                        channelBundleId,
+                        initiator);
 
-                // Fail as quickly as possible.
-                if (sctpConnection == null)
-                    throw new NullPointerException();
+            // Fail as quickly as possible.
+            if (sctpConnection == null)
+            {
+                throw new NullPointerException();
             }
         }
 
@@ -133,7 +138,11 @@ public class Health
         throws Exception
     {
         // Conference
-        Conference conference = videobridge.createConference(/* focus */ null);
+        Conference conference
+            = videobridge.createConference(
+                    /* focus */ null,
+                    /* name */ null,
+                    /* eventadmin */ false);
 
         // Fail as quickly as possible.
         if (conference == null)
