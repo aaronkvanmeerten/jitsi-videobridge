@@ -26,6 +26,7 @@ import org.jitsi.service.configuration.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.service.packetlogging.*;
 import org.jitsi.util.*;
+import org.jitsi.videobridge.*;
 
 /**
  * OSGi bundles description for the Jitsi Videobridge.
@@ -99,7 +100,8 @@ public class JvbBundleConfig
             // before the HTTP/JSON API because the HTTP/JSON API (1) exposes
             // the vital, non-optional, non-additional pieces of functionality
             // of the Videobridge and (2) it pulls, does not push.
-            "org/jitsi/videobridge/stats/StatsManagerBundleActivator"
+            "org/jitsi/videobridge/stats/StatsManagerBundleActivator",
+            "org/jitsi/videobridge/EndpointConnectionStatus"
         }
     };
 
@@ -217,6 +219,20 @@ public class JvbBundleConfig
                 true_);
         defaults.put(SRTPCryptoContext.CHECK_REPLAY_PNAME, false_);
 
+        // Sends "consent freshness" check every 3 seconds
+        defaults.put(
+                StackProperties.CONSENT_FRESHNESS_INTERVAL, "3000");
+        // Retry every 500ms by setting original and max wait intervals
+        defaults.put(
+                StackProperties.CONSENT_FRESHNESS_ORIGINAL_WAIT_INTERVAL,
+                "500");
+        defaults.put(
+                StackProperties.CONSENT_FRESHNESS_MAX_WAIT_INTERVAL, "500");
+        // Retry max 5 times which will take up to 2500ms, that is before
+        // the next "consent freshness" transaction starts
+        defaults.put(
+                StackProperties.CONSENT_FRESHNESS_MAX_RETRANSMISSIONS, "5");
+
         // In the majority of use-cases the clients which connect to Jitsi
         // Videobridge are not in the same network, so we don't need to
         // advertise link-local addresses.
@@ -233,6 +249,14 @@ public class JvbBundleConfig
         defaults.put(
                 PacketLoggingConfiguration.PACKET_LOGGING_ENABLED_PROPERTY_NAME,
                 false_);
+
+        // Disable discarding of unused LastN streams. It is suspected to cause
+        // problems, and needs to be reworked to skip decryption but not drop
+        // packets in order to work with sequence number rewriting for lastN.
+        // It is safe to (temporary) disable because it is only an optimization.
+        defaults.put(
+            VideoChannel.DISABLE_LASTN_UNUSED_STREAM_DETECTION,
+            true_);
 
         // This causes RTP/RTCP packets received before the DTLS agent is ready
         // to decrypt them to be dropped. Without it, these packets are passed

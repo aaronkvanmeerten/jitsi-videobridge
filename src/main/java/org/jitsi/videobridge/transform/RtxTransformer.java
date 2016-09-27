@@ -35,10 +35,12 @@ public class RtxTransformer
     implements TransformEngine
 {
     /**
-     * The <tt>Logger</tt> used by the <tt>RtxTransformer</tt> class and its
-     * instances to print debug information.
+     * The {@link Logger} used by the {@link RtxTransformer} class to print
+     * debug information. Note that {@link Conference} instances should use
+     * {@link #logger} instead.
      */
-    private static final Logger logger = Logger.getLogger(RtxTransformer.class);
+    private static final Logger classLogger
+        = Logger.getLogger(RtxTransformer.class);
 
     /**
      * The <tt>RtpChannel</tt> for the transformer.
@@ -51,6 +53,12 @@ public class RtxTransformer
     private final Map<Long, Integer> rtxSequenceNumbers = new HashMap<>();
 
     /**
+     * The {@link Logger} to be used by this instance to print debug
+     * information.
+     */
+    private final Logger logger;
+
+    /**
      * Initializes a new <tt>RtxTransformer</tt> with a specific
      * <tt>RtpChannel</tt>.
      *
@@ -61,6 +69,10 @@ public class RtxTransformer
         super(RTPPacketPredicate.INSTANCE);
 
         this.channel = channel;
+        this.logger
+            = Logger.getLogger(
+                    classLogger,
+                    channel.getContent().getConference().getLogger());
     }
 
     /**
@@ -175,19 +187,17 @@ public class RtxTransformer
      * each SSRC.
      *
      * @param ssrc the SSRC of the RTX stream for the packet.
-     * @param defaultSeq the default sequence number to use in case we don't
-     * (yet) have any information about <tt>ssrc</tt>.
      * @return the sequence number which should be used for the next RTX
      * packet sent using SSRC <tt>ssrc</tt>.
      */
-    private int getNextRtxSequenceNumber(long ssrc, int defaultSeq)
+    private int getNextRtxSequenceNumber(long ssrc)
     {
         Integer seq;
         synchronized (rtxSequenceNumbers)
         {
             seq = rtxSequenceNumbers.get(ssrc);
             if (seq == null)
-                seq = defaultSeq;
+                seq = new Random().nextInt(0xffff);
             else
                 seq++;
 
@@ -195,17 +205,6 @@ public class RtxTransformer
         }
 
         return seq;
-    }
-
-    /**
-     * Returns the next RTP sequence number to use for the RTX stream for a
-     * particular SSRC.
-     * @param ssrc the SSRC.
-     * @return the next sequence number to use for SSRC <tt>ssrc</tt>.
-     */
-    private int getNextRtxSequenceNumber(long ssrc)
-    {
-        return getNextRtxSequenceNumber(ssrc, new Random().nextInt(1 << 16));
     }
 
     /**

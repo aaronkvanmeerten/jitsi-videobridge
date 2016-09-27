@@ -40,10 +40,11 @@ public class RawUdpTransportManager
     extends TransportManager
 {
     /**
-     * The <tt>Logger</tt> used by the <tt>RawUdpTransportManager</tt> class and
-     * its instances to print debug information.
+     * The {@link Logger} used by the {@link RawUdpTransportManager} class to
+     * print debug information. Note that instances should use {@link #logger}
+     * instead.
      */
-    private static final Logger logger
+    private static final Logger classLogger
         = Logger.getLogger(RawUdpTransportManager.class);
 
     /**
@@ -82,6 +83,12 @@ public class RawUdpTransportManager
     private boolean started = false;
 
     /**
+     * The {@link Logger} to be used by this instance to print debug
+     * information.
+     */
+    private final Logger logger;
+
+    /**
      * Initializes a new <tt>RawUdpTransportManager</tt> instance.
      *
      * @param channel the <tt>Channel</tt> which is initializing the new
@@ -93,6 +100,10 @@ public class RawUdpTransportManager
         super();
 
         this.channel = channel;
+        this.logger
+            = Logger.getLogger(
+                    classLogger,
+                    channel.getContent().getConference().getLogger());
         addChannel(channel);
 
         streamConnector = createStreamConnector();
@@ -334,19 +345,19 @@ public class RawUdpTransportManager
             HarvesterConfiguration addressesConfig
                     = HarvesterConfiguration.getInstance(cfg);
 
-            InetAddress publicAddress = null;
+            InetAddress localAddress = null;
 
-            /*if the harverster public address is configured,
+            /*if the harverster local address is configured,
              *use this as the bind address.
              *NOTE: both public and local addresses need to be configured
              */
-            if (addressesConfig != null && addressesConfig.getPublicAddress() != null)
+            if (addressesConfig != null && addressesConfig.getLocalAddress() != null)
             {
-                publicAddress = addressesConfig.getPublicAddress().getAddress();
+                localAddress = addressesConfig.getLocalAddress().getAddress();
             }
 
-            if (publicAddress != null)
-                bindAddr = publicAddress;
+            if (localAddress != null)
+                bindAddr = localAddress;
             else
                 bindAddr = getLocalHostLanAddress();
         }

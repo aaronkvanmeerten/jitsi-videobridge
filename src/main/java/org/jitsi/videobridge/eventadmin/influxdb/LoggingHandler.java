@@ -272,10 +272,10 @@ public class LoggingHandler
         }
 
         Conference conference = endpoint.getConference();
-        if (conference == null)
+        if (conference.isExpired())
         {
             logger.debug("Could not log endpoint created event because " +
-                "the conference is null.");
+                "the conference has expired.");
             return;
         }
 
@@ -301,10 +301,10 @@ public class LoggingHandler
         }
 
         Conference conference = endpoint.getConference();
-        if (conference == null)
+        if (conference.isExpired())
         {
             logger.debug("Could not log endpoint display name changed " +
-                " event because the conference is null.");
+                " event because the conference has expired.");
             return;
         }
 
@@ -493,15 +493,6 @@ public class LoggingHandler
             return;
         }
 
-        Agent agent = transportManager.getAgent();
-        if (agent == null)
-        {
-            logger.debug(
-                    "Could not log the transport_created event"
-                        + " because the agent is null.");
-            return;
-        }
-
         logEvent(
                 new InfluxDBEvent(
                         "transport_created",
@@ -511,7 +502,7 @@ public class LoggingHandler
                             String.valueOf(transportManager.hashCode()),
                             conference.getID(),
                             transportManager.getNumComponents(),
-                            agent.getLocalUfrag(),
+                            transportManager.getLocalUfrag(),
                             Boolean
                                 .valueOf(transportManager.isControlling())
                                     .toString()

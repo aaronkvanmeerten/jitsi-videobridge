@@ -33,16 +33,16 @@ import java.util.*;
 public class LastNController
 {
     /**
-     * The <tt>Logger</tt> used by the <tt>VideoChannel</tt> class and its
-     * instances to print debug information.
+     * The {@link Logger} used by the {@link LastNController} class to print
+     * debug information. Note that instances should use {@link #logger} instead.
      */
-    private static final Logger logger
+    private static final Logger classLogger
          = Logger.getLogger(LastNController.class);
 
     /**
      * An empty list instance.
      */
-    private static final List<String> INITIAL_EMPTY_LIST
+    protected static final List<String> INITIAL_EMPTY_LIST
             = Collections.unmodifiableList(new LinkedList<String>());
 
     /**
@@ -107,6 +107,12 @@ public class LastNController
     private String endpointId;
 
     /**
+     * The {@link Logger} to be used by this instance to print debug
+     * information.
+     */
+    private final Logger logger;
+
+    /**
      * Initializes a new {@link LastNController} instance which is to belong
      * to a particular {@link VideoChannel}.
      * @param channel the owning {@link VideoChannel}.
@@ -114,6 +120,10 @@ public class LastNController
     public LastNController(VideoChannel channel)
     {
         this.channel = channel;
+        this.logger
+            = Logger.getLogger(
+                    classLogger,
+                    channel.getContent().getConference().getLogger());
     }
 
     /**
@@ -440,20 +450,18 @@ public class LastNController
     }
 
     /**
-     * Recalculates the list of forwarded endpoints based on the current values
-     * of the various parameters of this instance ({@link #lastN},
-     * {@link #conferenceSpeechActivityEndpoints}, {@link #pinnedEndpoints}).
+     * Determine the list of endpoints that should be forwarded to the receiver
      *
      * @param newConferenceEndpoints A list of endpoints which entered the
      * conference since the last call to this method. They need not be asked
      * for keyframes, because they were never filtered by this
-     * {@link #LastNController(VideoChannel)}.
+     * {@link #LastNController(VideoChannel)}. Used by extending classes.
      *
-     * @return the list of IDs of endpoints which were added to
-     * {@link #forwardedEndpoints} (i.e. of endpoints * "entering last-n") as a
-     * result of this call. Returns {@code null} if no endpoints were added.
+     * @return list of endpoints that should be forwarded, not necessarily in any
+     * particular order
      */
-    private synchronized List<String> update(List<String> newConferenceEndpoints)
+    @SuppressWarnings("unused")
+    protected List<String> determineLastNList(List<String> newConferenceEndpoints)
     {
         List<String> newForwardedEndpoints = new LinkedList<>();
         String ourEndpointId = getEndpointId();
@@ -461,8 +469,7 @@ public class LastNController
         if (conferenceSpeechActivityEndpoints == INITIAL_EMPTY_LIST)
         {
             conferenceSpeechActivityEndpoints
-                = getIDs(channel.getConferenceSpeechActivity().getEndpoints());
-            newConferenceEndpoints = conferenceSpeechActivityEndpoints;
+                    = getIDs(channel.getConferenceSpeechActivity().getEndpoints());
         }
 
         if (lastN < 0 && currentLastN < 0)
@@ -484,15 +491,14 @@ public class LastNController
             // As long as they are still endpoints in the conference.
             newForwardedEndpoints.retainAll(conferenceSpeechActivityEndpoints);
 
-            if (newForwardedEndpoints.size() > currentLastN)
+            // Don't exceed the last-n value no matter what the client has
+            // pinned.
+            while (newForwardedEndpoints.size() > currentLastN)
             {
-                // What do we want in this case? It looks like a contradictory
-                // request from the client, but maybe it makes for a good API
-                // on the client to allow the pinned to override last-n.
-                // Unfortunately, this will not play well with Adaptive-Last-N
-                // or changes to Last-N for other reasons.
+                newForwardedEndpoints.remove(newForwardedEndpoints.size() - 1);
             }
-            else if (newForwardedEndpoints.size() < currentLastN)
+
+            if (newForwardedEndpoints.size() < currentLastN)
             {
                 for (String endpointId : conferenceSpeechActivityEndpoints)
                 {
@@ -511,6 +517,26 @@ public class LastNController
                 }
             }
         }
+        return newForwardedEndpoints;
+    }
+
+    /**
+     * Recalculates the list of forwarded endpoints based on the current values
+     * of the various parameters of this instance ({@link #lastN},
+     * {@link #conferenceSpeechActivityEndpoints}, {@link #pinnedEndpoints}).
+     *
+     * @param newConferenceEndpoints A list of endpoints which entered the
+     * conference since the last call to this method. They need not be asked
+     * for keyframes, because they were never filtered by this
+     * {@link #LastNController(VideoChannel)}.
+     *
+     * @return the list of IDs of endpoints which were added to
+     * {@link #forwardedEndpoints} (i.e. of endpoints * "entering last-n") as a
+     * result of this call. Returns {@code null} if no endpoints were added.
+     */
+    private synchronized List<String> update(List<String> newConferenceEndpoints)
+    {
+        List<String> newForwardedEndpoints = determineLastNList(newConferenceEndpoints);
 
         newForwardedEndpoints
             = orderBy(newForwardedEndpoints, conferenceSpeechActivityEndpoints);
@@ -624,16 +650,13 @@ public class LastNController
     {
         Endpoint endpoint = null;
 
-        if (channel != null)
+        Content content = channel.getContent();
+        if (content != null)
         {
-            Content content = channel.getContent();
-            if (content != null)
+            Conference conference = content.getConference();
+            if (conference != null)
             {
-                Conference conference = content.getConference();
-                if (conference != null)
-                {
-                    endpoint = conference.getEndpoint(id);
-                }
+                endpoint = conference.getEndpoint(id);
             }
         }
 

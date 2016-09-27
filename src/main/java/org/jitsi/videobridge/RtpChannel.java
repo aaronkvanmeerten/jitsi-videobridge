@@ -64,10 +64,11 @@ public class RtpChannel
         = "org.jitsi.videobridge.DISABLE_ABS_SEND_TIME";
 
     /**
-     * The <tt>Logger</tt> used by the <tt>RtpChannel</tt> class and its
-     * instances to print debug information.
+     * The {@link Logger} used by the {@link RtpChannel} class to print debug
+     * information. Note that instances should use {@link #logger} instead.
      */
-    private static final Logger logger = Logger.getLogger(RtpChannel.class);
+    private static final Logger classLogger
+        = Logger.getLogger(RtpChannel.class);
 
     /**
      * An empty array of received synchronization source identifiers (SSRCs).
@@ -116,27 +117,6 @@ public class RtpChannel
      * and not in the case of RTP translation.
      */
     private final long initialLocalSSRC;
-
-    /**
-     * The last known number of lost packets for this channel.
-     */
-    private long lastKnownPacketsLostNB = 0;
-
-    /**
-     * The last known number of packets that are received or sent for this
-     * channel.
-     */
-    private long lastKnownPacketsNB = 0;
-
-    /**
-     * The last known number of received bytes.
-     */
-    private long lastKnownReceivedBytes = 0;
-
-    /**
-     * The last known number of sent bytes.
-     */
-    private long lastKnownSentBytes = 0;
 
     /**
      * The <tt>PropertyChangeListener</tt> which listens to
@@ -222,20 +202,17 @@ public class RtpChannel
     RtpChannelTransformEngine transformEngine = null;
 
     /**
-     * Gets the <tt>TransformEngine</tt> of this <tt>RtpChannel</tt>.
-     *
-     * @return The <tt>TransformEngine</tt> of this <tt>RtpChannel</tt>.
+     * The {@link Logger} to be used by this instance to print debug
+     * information.
      */
-    public RtpChannelTransformEngine getTransformEngine()
-    {
-        return this.transformEngine;
-    }
+    private final Logger logger;
 
     /**
      * The FID (flow ID) groupings used by the remote side of this
      * <tt>RtpChannel</tt>. We map a "media" SSRC to the "RTX" SSRC.
      */
-    protected Map<Long,Long> fidSourceGroups = new HashMap<>();
+    protected final Map<Long,Long> fidSourceGroups
+        = new HashMap<>();
 
     /**
      * The payload type number configured for RTX (RFC-4588) for this channel,
@@ -284,6 +261,11 @@ public class RtpChannel
         throws Exception
     {
         super(content, id, channelBundleId, transportNamespace, initiator);
+
+        logger
+            = Logger.getLogger(
+                    classLogger,
+                    content.getConference().getLogger());
 
         /*
          * In the case of content mixing, each Channel has its own local
@@ -360,7 +342,7 @@ public class RtpChannel
         if (accept)
         {
             // Note that this Channel is still active.
-            touch();
+            touch(ActivityType.PAYLOAD /* control received */);
 
             /*
              * Does the data of the specified DatagramPacket resemble (a header
@@ -459,7 +441,7 @@ public class RtpChannel
         if (accept)
         {
             // Note that this Channel is still active.
-            touch();
+            touch(ActivityType.PAYLOAD /* data received */);
 
             /*
              * Does the data of the specified DatagramPacket resemble (a header
@@ -739,13 +721,8 @@ public class RtpChannel
      * identified a speaker switch event in the multipoint conference and there
      * is now a new dominant speaker.
      */
-    private void dominantSpeakerChanged()
+    protected void dominantSpeakerChanged()
     {
-        /*
-         * TODO Invoke conferenceSpeechActivity.getDominantEndpoint() and, for
-         * example, notify the Jitsi Videobridge client about the dominance
-         * switch to a new speaker.
-         */
     }
 
     /**
@@ -797,75 +774,6 @@ public class RtpChannel
     }
 
     /**
-     * Returns the number of lost packets for this channel since last time the
-     * method is called.
-     *
-     * Note: {@link org.jitsi.videobridge.stats.VideobridgeStatistics} uses this
-     * method and it relies on the fact that the method is not called from
-     * anywhere else. This should probably be refactored.
-     *
-     * @return the number of lost packets since last time the method is called.
-     */
-    public long getLastPacketsLostNB()
-    {
-        // XXX The field stream is assigned to in #initialize(RTPLevelRelayType)
-        // but by that time this RtpChannel is already exposed through its
-        // Content.
-        MediaStream stream = this.stream;
-
-        if (stream == null)
-            return 0;
-
-        long newPacketsLost = stream.getMediaStreamStats().getNbPacketsLost();
-        long lastPacketsNB = newPacketsLost - lastKnownPacketsLostNB;
-
-        if (lastPacketsNB < 0)
-        {
-            return 0;
-        }
-        else
-        {
-            lastKnownPacketsLostNB = newPacketsLost;
-            return lastPacketsNB;
-        }
-    }
-
-    /**
-     * Returns the number of packets that are sent or received for this channel
-     * since last time the method is called.
-     *
-     * Note: {@link org.jitsi.videobridge.stats.VideobridgeStatistics} uses this
-     * method and it relies on the fact that the method is not called from
-     * anywhere else. This should probably be refactored.
-     *
-     * @return  the number of packets that are sent or received since last time
-     * the method is called.
-     */
-    public long getLastPacketsNB()
-    {
-        // XXX The field stream is assigned to in #initialize(RTPLevelRelayType)
-        // but by that time this RtpChannel is already exposed through its
-        // Content.
-        MediaStream stream = this.stream;
-
-        if (stream == null)
-            return 0;
-
-        long newPackets = stream.getMediaStreamStats().getNbPackets();
-        long lastPacketsNB = newPackets - lastKnownPacketsNB;
-
-        if (lastPacketsNB < 0)
-        {
-            return 0;
-        }
-        else
-        {
-            lastKnownPacketsNB = newPackets;
-            return lastPacketsNB;
-        }
-    }
-
-    /**
      * Returns a <tt>MediaService</tt> implementation (if any).
      *
      * @return a <tt>MediaService</tt> implementation (if any).
@@ -873,70 +781,6 @@ public class RtpChannel
     private MediaService getMediaService()
     {
         return getContent().getMediaService();
-    }
-
-    /**
-     * Returns the number of received bytes since the last time the
-     * method was called.
-     *
-     * Note: {@link org.jitsi.videobridge.stats.VideobridgeStatistics} uses this
-     * method and it relies on the fact that the method is not called from
-     * anywhere else. This should probably be refactored.
-     *
-     * @return the number of received bytes.
-     */
-    public long getNBReceivedBytes()
-    {
-        // XXX The field stream is assigned to in #initialize(RTPLevelRelayType)
-        // but by that time this RtpChannel is already exposed through its
-        // Content.
-        MediaStream stream = this.stream;
-
-        if (stream == null)
-            return 0;
-
-        long newBytes = stream.getMediaStreamStats().getNbReceivedBytes();
-        long bytes = 0;
-
-        if (newBytes > lastKnownReceivedBytes)
-        {
-            bytes += newBytes - lastKnownReceivedBytes;
-            lastKnownReceivedBytes = newBytes;
-        }
-
-        return bytes;
-    }
-
-    /**
-     * Returns the number of sent bytes since the last time the
-     * method was called.
-     *
-     * Note: {@link org.jitsi.videobridge.stats.VideobridgeStatistics} uses this
-     * method and it relies on the fact that the method is not called from
-     * anywhere else. This should probably be refactored.
-     *
-     * @return the number of sent bytes.
-     */
-    public long getNBSentBytes()
-    {
-        // XXX The field stream is assigned to in #initialize(RTPLevelRelayType)
-        // but by that time this RtpChannel is already exposed through its
-        // Content.
-        MediaStream stream = this.stream;
-
-        if (stream == null)
-            return 0;
-
-        long newBytes = stream.getMediaStreamStats().getNbSentBytes();
-        long bytes = 0;
-
-        if (newBytes > lastKnownSentBytes)
-        {
-            bytes += newBytes - lastKnownSentBytes;
-            lastKnownSentBytes = newBytes;
-        }
-
-        return bytes;
     }
 
     /**
@@ -1176,7 +1020,9 @@ public class RtpChannel
 
             EventAdmin eventAdmin = conference.getEventAdmin();
             if (eventAdmin != null)
+            {
                 eventAdmin.sendEvent(EventFactory.streamStarted(this));
+            }
         }
 
         if (logger.isTraceEnabled())
@@ -1187,8 +1033,6 @@ public class RtpChannel
                         + conference.getID() + " is "
                         + stream.getDirection() + ".");
         }
-
-        touch(); // It seems this Channel is still active.
     }
 
     /**
@@ -1275,8 +1119,6 @@ public class RtpChannel
     {
         Object source = ev.getSource();
 
-        // At the time of writing this doesn't do anything (dominantSpeakerChanged
-        // is empty in all Channel implementations). Should we remove it if it is unused?
         if ((conferenceSpeechActivity == source)
                 && (conferenceSpeechActivity != null))
         {
@@ -1556,8 +1398,13 @@ public class RtpChannel
                     = stream.getRetransmissionRequester();
                 if (retransmissionRequester != null)
                 {
+                    Map<Long, Long> copy;
+                    synchronized (fidSourceGroups)
+                    {
+                        copy = new HashMap<>(fidSourceGroups);
+                    }
                     retransmissionRequester.configureRtx(rtxPayloadType,
-                                                         fidSourceGroups);
+                                                         copy);
                 }
             }
         }
@@ -1857,6 +1704,17 @@ public class RtpChannel
         addedSSRCs.removeAll(oldSignaledSSRCs);
         if (!addedSSRCs.isEmpty())
         {
+
+            Recorder recorder = null;
+            Synchronizer synchronizer = null;
+            Endpoint endpoint = null;
+            if (getContent().isRecording())
+            {
+                recorder = getContent().getRecorder();
+                synchronizer = recorder.getSynchronizer();
+                endpoint = getEndpoint();
+            }
+
             for (Integer addedSSRC : addedSSRCs)
             {
                 try
@@ -1864,6 +1722,15 @@ public class RtpChannel
                     // Do allow the number of explicitly signalled SSRCs to
                     // exceed the limit.
                     addReceiveSSRC(addedSSRC, false);
+
+                    // If recording is enabled, we need to add the mapping from
+                    // SSRC to EndpointID into the Synchronizer
+                    // instance used by RecorderRtpImpl.
+                    if (recorder != null && endpoint != null && synchronizer != null)
+                    {
+                        synchronizer.setEndpoint(addedSSRC & 0xffffffffl,
+                            endpoint.getID());
+                    }
                 }
                 catch (SizeExceededException see)
                 {
@@ -1932,7 +1799,10 @@ public class RtpChannel
                 // Here we assume that the first source in the group is the
                 // SSRC for the media stream, and the second source is the
                 // one for the RTX stream.
-                fidSourceGroups.put(first, second);
+                synchronized (fidSourceGroups)
+                {
+                    fidSourceGroups.put(first, second);
+                }
             }
         }
 
@@ -1941,8 +1811,13 @@ public class RtpChannel
             = stream.getRetransmissionRequester();
         if (retransmissionRequester != null)
         {
+            Map<Long, Long> copy;
+            synchronized (fidSourceGroups)
+            {
+                copy = new HashMap<>(fidSourceGroups);
+            }
             retransmissionRequester.configureRtx(rtxPayloadType,
-                                                 fidSourceGroups);
+                                                 copy);
         }
     }
 
@@ -1958,6 +1833,8 @@ public class RtpChannel
     }
 
     /**
+     * {@inheritDoc}
+     *
      * Closes {@link #transformEngine}. Normally this would be done by
      * {@link #stream} when it is being closed, but we have observed cases (e.g.
      * when running health checks) where it doesn't happen, and since
@@ -1965,8 +1842,35 @@ public class RtpChannel
      * assumes the responsibility of releasing its resources.
      */
     @Override
-    public void expire()
+    public boolean expire()
     {
+        if (!super.expire())
+        {
+            // Already expired.
+            return false;
+        }
+
+        if (getContent().getConference().includeInStatistics())
+        {
+            Conference.Statistics conferenceStatistics
+                = getContent().getConference().getStatistics();
+            conferenceStatistics.totalChannels.incrementAndGet();
+
+            long lastPayloadActivityTime = getLastPayloadActivityTime();
+            long lastTransportActivityTime = getLastTransportActivityTime();
+
+            if (lastTransportActivityTime == 0)
+            {
+                // Check for ICE failures.
+                conferenceStatistics.totalNoTransportChannels.incrementAndGet();
+            }
+
+            if (lastPayloadActivityTime == 0)
+            {
+                // Check for payload.
+                conferenceStatistics.totalNoPayloadChannels.incrementAndGet();
+            }
+        }
         TransformEngine transformEngine = this.transformEngine;
         if (transformEngine != null)
         {
@@ -1983,7 +1887,7 @@ public class RtpChannel
             }
         }
 
-        super.expire();
+        return true;
     }
 
     /**
@@ -2026,20 +1930,23 @@ public class RtpChannel
      */
     public long getFidPairedSsrc(long ssrc)
     {
-        Long paired = fidSourceGroups.get(ssrc);
-        if (paired != null)
+        synchronized (fidSourceGroups)
         {
-            return paired;
-        }
+            Long paired = fidSourceGroups.get(ssrc);
+            if (paired != null)
+            {
+                return paired;
+            }
 
-        // Maybe 'ssrc' is one of the values.
-        for (Map.Entry<Long, Long> entry : fidSourceGroups.entrySet())
-        {
-            if (entry.getValue() == ssrc)
-                return entry.getKey();
-        }
+            // Maybe 'ssrc' is one of the values.
+            for (Map.Entry<Long, Long> entry : fidSourceGroups.entrySet())
+            {
+                if (entry.getValue() == ssrc)
+                    return entry.getKey();
+            }
 
-        return -1;
+            return -1;
+        }
     }
 
     /**
@@ -2073,6 +1980,17 @@ public class RtpChannel
         }
         return engine.setPacketDelay(packetDelay);
     }
+
+    /**
+     * Gets the <tt>TransformEngine</tt> of this <tt>RtpChannel</tt>.
+     *
+     * @return The <tt>TransformEngine</tt> of this <tt>RtpChannel</tt>.
+     */
+    public RtpChannelTransformEngine getTransformEngine()
+    {
+        return this.transformEngine;
+    }
+
 
     /**
      * An exception indicating that the maximum size of something was exceeded.

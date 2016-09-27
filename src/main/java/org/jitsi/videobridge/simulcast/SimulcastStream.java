@@ -210,15 +210,6 @@ public class SimulcastStream
         return isStreaming || order == 0;
     }
 
-    public boolean isKeyFrame(RawPacket pkt)
-    {
-        byte redPT = simulcastReceiver.getSimulcastEngine()
-            .getVideoChannel().getRedPayloadType();
-        byte vp8PT = simulcastReceiver.getSimulcastEngine()
-            .getVideoChannel().getVP8PayloadType();
-        return Utils.isKeyFrame(pkt, redPT, vp8PT);
-    }
-
     /**
      * Utility method that asks for a keyframe for a specific simulcast stream.
      * This is typically done when switching streams. This method is executed in

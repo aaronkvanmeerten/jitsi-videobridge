@@ -52,16 +52,22 @@ public abstract class Channel
     public static final String INITIATOR_PROPERTY = "initiator";
 
     /**
-     * The <tt>Logger</tt> used by the <tt>Channel</tt> class and its instances
-     * to print debug information.
+     * The {@link Logger} used by the {@link Channel} class to print debug
+     * information. Note that {@link Channel} instances should use {@link
+     * #logger} instead.
      */
-    private static final Logger logger = Logger.getLogger(Channel.class);
+    private static final Logger classLogger = Logger.getLogger(Channel.class);
 
     /**
      * The ID of the channel-bundle that this <tt>Channel</tt> is part of, or
      * <tt>null</tt> if it is not part of a channel-bundle.
      */
     private final String channelBundleId;
+
+    /**
+     * Remembers when this <tt>Channel</tt> instance was created.
+     */
+    private final long creationTimestamp = System.currentTimeMillis();
 
     /**
      * The name of the <tt>Channel</tt> property <tt>endpoint</tt> which
@@ -116,6 +122,24 @@ public abstract class Channel
         = new MonotonicAtomicLong();
 
     /**
+     * The time in milliseconds of the last transport related activity to this
+     * <tt>Channel</tt>. Currently this means when for the last time there were
+     * any RTP packets received for this channel or ICE "consent freshness
+     * check" has succeeded. In the time interval between the last activity and
+     * now, this <tt>Channel</tt>'s transport is considered inactive.
+     */
+    private final MonotonicAtomicLong lastTransportActivityTime
+        = new MonotonicAtomicLong();
+
+    /**
+     * The time in milliseconds of the last payload related activity to this
+     * <tt>Channel</tt>. Currently this means when for the last time there were
+     * any RTP/RTCP packets received for this channel.
+     */
+    private final MonotonicAtomicLong lastPayloadActivityTime
+        = new MonotonicAtomicLong();
+
+    /**
      * The <tt>StreamConnector</tt> currently used by this <tt>Channel</tt>.
      */
     private StreamConnector streamConnector;
@@ -137,6 +161,12 @@ public abstract class Channel
      * {@link #transportManager}.
      */
     private final Object transportManagerSyncRoot = new Object();
+
+    /**
+     * The {@link Logger} to be used by this instance to print debug
+     * information.
+     */
+    private final Logger logger;
 
     /**
      * Initializes a new <tt>Channel</tt> instance which is to have a specific
@@ -175,6 +205,10 @@ public abstract class Channel
         this.channelBundleId = channelBundleId;
         if (initiator != null)
             this.initiator = initiator;
+
+        this.logger
+            = Logger.getLogger(classLogger,
+                               content.getConference().getLogger());
 
         // Get default transport namespace
         if (StringUtils.isNullOrEmpty(transportNamespace))
@@ -317,13 +351,15 @@ public abstract class Channel
      * Expires this <tt>Channel</tt>. Releases the resources acquired by this
      * instance throughout its life time and prepares it to be garbage
      * collected.
+     * @return {@code true} if the channel was expired as a result of this
+     * call, and {@code false} if the channel was already expired.
      */
-    public void expire()
+    public boolean expire()
     {
         synchronized (this)
         {
             if (expired)
-                return;
+                return false;
             else
                 expired = true;
         }
@@ -404,6 +440,8 @@ public abstract class Channel
                             + videobridge.getConferenceCountString());
             }
         }
+
+        return true;
     }
 
     /**
@@ -427,6 +465,18 @@ public abstract class Channel
     public Content getContent()
     {
         return content;
+    }
+
+    /**
+     * Gets the time in milliseconds which tells when this <tt>Channel</tt> was
+     * created.
+     *
+     * @return the time in milliseconds which indicates when this
+     * <tt>Channel</tt> instance was created.
+     */
+    public long getCreationTimestamp()
+    {
+        return creationTimestamp;
     }
 
     /**
@@ -498,6 +548,34 @@ public abstract class Channel
     }
 
     /**
+     * Gets the time in milliseconds of the last payload related activity
+     * for this <tt>Channel</tt>.
+     *
+     * @return the time in milliseconds of the last payload related activity
+     * for this <tt>Channel</tt>.
+     *
+     * @see #lastTransportActivityTime
+     */
+    public long getLastPayloadActivityTime()
+    {
+        return lastPayloadActivityTime.get();
+    }
+
+    /**
+     * Gets the time in milliseconds of the last transport related activity
+     * for this <tt>Channel</tt>.
+     *
+     * @return the time in milliseconds of the last transport related activity
+     * for this <tt>Channel</tt>.
+     *
+     * @see #lastTransportActivityTime
+     */
+    public long getLastTransportActivityTime()
+    {
+        return lastTransportActivityTime.get();
+    }
+
+    /**
      * Gets the <tt>StreamConnector</tt> currently used by this instance.
      * @return the <tt>StreamConnector</tt> currently used by this instance.
      */
@@ -525,7 +603,7 @@ public abstract class Channel
      * if "bundle" is being used.
      * @throws IOException in case of transport manager initialization error
      */
-    public void initialize()
+    void initialize()
             throws IOException
     {
         synchronized (transportManagerSyncRoot)
@@ -543,8 +621,7 @@ public abstract class Channel
             {
                 transportManager
                     = getContent().getConference()
-                        .getTransportManager(channelBundleId, true);
-
+                        .getTransportManager(channelBundleId, true, isInitiator());
             }
 
             if (transportManager == null)
@@ -584,14 +661,12 @@ public abstract class Channel
     }
 
     /**
-     * TODO: update this javadoc
-     * Starts {@link #stream} if it has not been started yet and if the state of
-     * this <tt>Channel</tt> meets the prerequisites to invoke
+     * Starts this channel's stream if it has not been started yet and if the
+     * state of this <tt>Channel</tt> meets the prerequisites to invoke
      * {@link MediaStream#start()}. For example, <tt>MediaStream</tt> may be
      * started only after a <tt>StreamConnector</tt> has been set on it and this
      * <tt>Channel</tt> may be able to provide a <tt>StreamConnector</tt> only
-     * after {@link #wrapupConnectivityEstablishment(TransportManager)} has
-     * completed on {@link #transportManager}.
+     * after {@link #transportManager} has connected.
      *
      * @throws IOException if anything goes wrong while starting <tt>stream</tt>
      */
@@ -739,10 +814,54 @@ public abstract class Channel
     /**
      * Sets the time in milliseconds of the last activity related to this
      * <tt>Channel</tt> to the current system time.
+     *
+     * @param activityType the activity type that has happened on this
+     * channel.
+     */
+    public void touch(ActivityType activityType)
+    {
+        long now = System.currentTimeMillis();
+
+        switch (activityType)
+        {
+            case PAYLOAD:
+                lastPayloadActivityTime.increase(now);
+            case TRANSPORT:
+                lastTransportActivityTime.increase(now);
+            default:
+                lastActivityTime.increase(now);
+        }
+    }
+
+    /**
+     * This enum describes the possible {@link Channel} activity types.
+     */
+    public enum ActivityType
+    {
+        /**
+         * Transport level activity like ICE consent checks and/or RTP/RTCP
+         * packets received.
+         */
+        TRANSPORT,
+
+        /**
+         * Application level activity like RTP/RTCP packets received.
+         */
+        PAYLOAD,
+
+        /**
+         * Anything else that doesn't fall in the above two categories.
+         */
+        OTHER
+    }
+
+    /**
+     * Sets the time in milliseconds of the last activity related to this
+     * <tt>Channel</tt> to the current system time.
      */
     public void touch()
     {
-        lastActivityTime.increase(System.currentTimeMillis());
+        touch(ActivityType.OTHER);
     }
 
     /**
@@ -764,6 +883,10 @@ public abstract class Channel
                             + " of content " + getContent().getName()
                             + " of conference "
                             + getContent().getConference().getID());
+
+        // It seems this Channel is still active.
+        touch(ActivityType.TRANSPORT /* transport connected */);
+
         try
         {
             maybeStartStream();

@@ -37,6 +37,7 @@ import org.jitsi.service.neomedia.codec.*;
 import org.jitsi.service.neomedia.format.*;
 import org.jitsi.service.neomedia.rtp.*;
 import org.jitsi.util.*;
+import org.jitsi.util.Logger; // Disambiguation.
 import org.jitsi.videobridge.rtcp.*;
 import org.jitsi.videobridge.simulcast.*;
 import org.jitsi.videobridge.transform.*;
@@ -80,33 +81,25 @@ public class VideoChannel
             = "org.jitsi.videobridge.DISABLE_NACK_TERMINATION";
 
     /**
-     * The <tt>Logger</tt> used by the <tt>VideoChannel</tt> class and its
-     * instances to print debug information.
+     * The name of the property used to disable the logic which detects and
+     * marks/discards packets coming from "unused" streams.
      */
-    private static final Logger logger = Logger.getLogger(VideoChannel.class);
+    public static final String DISABLE_LASTN_UNUSED_STREAM_DETECTION
+        = "org.jitsi.videobridge.DISABLE_LASTN_UNUSED_STREAM_DETECTION";
 
     /**
-     * The payload type number configured for VP8 for this channel,
-     * or -1 if none is configured (the other end does not support VP8).
+     * The {@link Logger} used by the {@link VideoChannel} class to print debug
+     * information. Note that instances should use {@link #logger} instead.
      */
-    private byte vp8PayloadType = -1;
-
+    private static final Logger classLogger
+        = Logger.getLogger(VideoChannel.class);
 
     /**
-     * XXX Defaulting to the lowest-quality simulcast stream until we are
-     * explicitly told to switch to a higher-quality simulcast stream is one way
-     * to go, of course. But such a default presents the problem that a remote
-     * peer will see the lowest quality possible for a noticeably long period of
-     * time because its command to switch to the highest quality possible can
-     * only come via its data/SCTP channel and that may take a very (and
-     * unpredictably) long time to set up. That is why we may default to the
-     * highest-quality simulcast stream here.
-     *
-     * This value can be set through colibri channel IQ with
-     * receive-simulcast-layer attribute.
+     * The {@link Timer} used to execute sending of delayed FIR requests for all
+     * {@link VideoChannel}s.
      */
-    private int receiveSimulcastLayer
-            = SimulcastStream.SIMULCAST_LAYER_ORDER_BASE; // Integer.MAX_VALUE;
+    private static final Timer delayedFirTimer = new Timer();
+
 
     /**
      * Updates the values of the property <tt>inLastN</tt> of all
@@ -135,11 +128,38 @@ public class VideoChannel
                     else if (t instanceof ThreadDeath)
                         throw (ThreadDeath) t;
                     else
-                        logger.error(t);
+                        classLogger.error(t);
                 }
             }
         }
     }
+
+    /**
+     * The payload type number configured for VP8 for this channel,
+     * or -1 if none is configured (the other end does not support VP8).
+     */
+    private byte vp8PayloadType = -1;
+
+    /**
+     * XXX Defaulting to the lowest-quality simulcast stream until we are
+     * explicitly told to switch to a higher-quality simulcast stream is one way
+     * to go, of course. But such a default presents the problem that a remote
+     * peer will see the lowest quality possible for a noticeably long period of
+     * time because its command to switch to the highest quality possible can
+     * only come via its data/SCTP channel and that may take a very (and
+     * unpredictably) long time to set up. That is why we may default to the
+     * highest-quality simulcast stream here.
+     *
+     * This value can be set through colibri channel IQ with
+     * receive-simulcast-layer attribute.
+     *
+     * XXX(boris) I cannot find the semantics of this field documented anywhere.
+     * It is used inconsistently (only when a SimulcastSender is created, but
+     * not when the targetOrder changes for another reason), and the original
+     * intention seems lost.
+     */
+    private int receiveSimulcastLayer
+            = SimulcastStream.SIMULCAST_LAYER_ORDER_BASE; // Integer.MAX_VALUE;
 
     /**
      * The <tt>SimulcastMode</tt> for this <tt>VideoChannel</tt>.
@@ -156,6 +176,7 @@ public class VideoChannel
     /**
      * The instance which will be computing the incoming bitrate for this
      * <tt>VideoChannel</tt>.
+     * @deprecated We should use the statistics from the media stream for this.
      */
     private final RateStatistics incomingBitrate
         = new RateStatistics(INCOMING_BITRATE_INTERVAL_MS, 8000F);
@@ -171,6 +192,22 @@ public class VideoChannel
      * on this channel.
      */
     private final boolean requestRetransmissions;
+
+    /**
+     * The {@link Logger} to be used by this instance to print debug
+     * information.
+     */
+    private final Logger logger;
+
+    /**
+     * The task which is to send a FIR on this channel, after a delay.
+     */
+    private TimerTask delayedFirTask;
+
+    /**
+     * The object used to synchronize access to {@link #delayedFirTask}.
+     */
+    private final Object delayedFirTaskSyncRoot = new Object();
 
     /**
      * Initializes a new <tt>VideoChannel</tt> instance which is to have a
@@ -200,6 +237,11 @@ public class VideoChannel
         throws Exception
     {
         super(content, id, channelBundleId, transportNamespace, initiator);
+
+        logger
+            = Logger.getLogger(
+                    classLogger,
+                    content.getConference().getLogger());
 
         initializeTransformerEngine();
 
@@ -335,21 +377,37 @@ public class VideoChannel
         // from VideoChannels/Endpoints which are not in any
         // VideoChannel/Endpoint's lastN.
         TransformEngine[] engines = chain.getEngineChain();
-        boolean add = true;
+        boolean addLastNTransformEngine = true;
 
-        if ((engines != null) && (engines.length != 0))
+        ConfigurationService cfg
+            = getContent().getConference().getVideobridge()
+                    .getConfigurationService();
+        if (cfg != null)
+        {
+            addLastNTransformEngine
+                = !cfg.getBoolean(DISABLE_LASTN_UNUSED_STREAM_DETECTION, false);
+        }
+
+        if (addLastNTransformEngine && (engines != null) && (engines.length != 0))
         {
             for (TransformEngine engine : engines)
             {
                 if (engine instanceof LastNTransformEngine)
                 {
-                    add = false;
+                    addLastNTransformEngine = false;
                     break;
                 }
             }
         }
-        if (add)
+        if (addLastNTransformEngine)
+        {
+            if (logger.isDebugEnabled())
+            {
+                logger.debug("Adding LastNTransformEngine for endpoint "
+                                 + getChannelBundleId());
+            }
             chain.addEngine(new LastNTransformEngine(this));
+        }
     }
 
     /**
@@ -371,6 +429,7 @@ public class VideoChannel
      * <tt>VideoChannel</tt> (computed as the average bitrate over the last
      * {@link #INCOMING_BITRATE_INTERVAL_MS} milliseconds).
      *
+     * @deprecated We should use the statistics from the media stream for this.
      * @return the current incoming bitrate for this <tt>VideoChannel</tt>.
      */
     public long getIncomingBitrate()
@@ -498,12 +557,15 @@ public class VideoChannel
             byte[] buffer, int offset, int length,
             Channel source)
     {
-        boolean accept = true;
+        // XXX(gp) we could potentially move this into a TransformEngine.
+        boolean accept = lastNController.isForwarded(source);
 
-        if (data && (source != null))
+        LipSyncHack lipSyncHack = getEndpoint().getLipSyncHack();
+
+        if (lipSyncHack != null)
         {
-            // XXX(gp) we could potentially move this into a TransformEngine.
-            accept = lastNController.isForwarded(source);
+            lipSyncHack.onRTPTranslatorWillWriteVideo(
+                accept, data, buffer, offset, length, this);
         }
 
         return accept;
@@ -543,14 +605,29 @@ public class VideoChannel
      * Closes the {@link LastNController} before expiring the channel.
      */
     @Override
-    public void expire()
+    public boolean expire()
     {
+        if (!super.expire())
+        {
+            // Already expired.
+            return false;
+        }
+
         if (lastNController != null)
         {
             lastNController.close();
         }
 
-        super.expire();
+        synchronized (delayedFirTaskSyncRoot)
+        {
+            if (delayedFirTask != null)
+            {
+                delayedFirTask.cancel();
+                delayedFirTask = null;
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -975,25 +1052,29 @@ public class VideoChannel
 
         // FID groups have been saved in RtpChannel. Make sure any changes are
         // propagated to the appropriate SimulcastStream-s.
-        if (this.fidSourceGroups != null && this.fidSourceGroups.size() != 0)
+        synchronized (fidSourceGroups)
         {
-            for (Map.Entry<Long, Long> entry : this.fidSourceGroups.entrySet())
+            if (!fidSourceGroups.isEmpty())
             {
-                if (entry.getKey() == null || entry.getValue() == null)
+                for (Map.Entry<Long, Long> entry : this.fidSourceGroups
+                    .entrySet())
                 {
-                    continue;
-                }
-
-                // autoboxing.
-                long primarySSRC = entry.getKey();
-                long fidSSRC = entry.getValue();
-
-                for (int i = 0; i < simulcastTriplets.length; i++)
-                {
-                    if (simulcastTriplets[i][0] == primarySSRC)
+                    if (entry.getKey() == null || entry.getValue() == null)
                     {
-                        simulcastTriplets[i][1] = fidSSRC;
-                        break;
+                        continue;
+                    }
+
+                    // autoboxing.
+                    long primarySSRC = entry.getKey();
+                    long fidSSRC = entry.getValue();
+
+                    for (int i = 0; i < simulcastTriplets.length; i++)
+                    {
+                        if (simulcastTriplets[i][0] == primarySSRC)
+                        {
+                            simulcastTriplets[i][1] = fidSSRC;
+                            break;
+                        }
                     }
                 }
             }
@@ -1150,13 +1231,13 @@ public class VideoChannel
         }
 
         logger.debug("Updating our view of the peer video channel.");
-        final Set<Integer> ssrcGroup = new HashSet<>();
-        final Map<Integer, Integer> rtxGroups = new HashMap<>();
+        final Set<Long> ssrcGroup = new HashSet<>();
+        final Map<Long, Long> rtxGroups = new HashMap<>();
 
         for (SimulcastStream stream : streams)
         {
-            int primarySSRC = (int) stream.getPrimarySSRC();
-            int rtxSSRC = (int) stream.getRTXSSRC();
+            long primarySSRC = stream.getPrimarySSRC();
+            long rtxSSRC = stream.getRTXSSRC();
 
             ssrcGroup.add(primarySSRC);
 
@@ -1167,12 +1248,12 @@ public class VideoChannel
         }
 
         SimulcastStream baseStream = streams[0];
-        final Integer ssrcTargetPrimary = (int) baseStream.getPrimarySSRC();
-        final Integer ssrcTargetRTX = (int) baseStream.getRTXSSRC();
+        final Long ssrcTargetPrimary = baseStream.getPrimarySSRC();
+        final Long ssrcTargetRTX = baseStream.getRTXSSRC();
 
         // Update the SSRC rewriting engine from the media stream state.
-        final Map<Integer, Byte> ssrc2fec = new HashMap<>();
-        final Map<Integer, Byte> ssrc2red = new HashMap<>();
+        final Map<Long, Byte> ssrc2fec = new HashMap<>();
+        final Map<Long, Byte> ssrc2red = new HashMap<>();
 
         for (Map.Entry<Byte, MediaFormat> entry :
             peerVideoChannel.getStream().getDynamicRTPPayloadTypes().entrySet())
@@ -1181,24 +1262,24 @@ public class VideoChannel
             String encoding = entry.getValue().getEncoding();
             if (Constants.RED.equals(encoding))
             {
-                for (Integer ssrc : ssrcGroup)
+                for (Long ssrc : ssrcGroup)
                 {
                     ssrc2red.put(ssrc, pt);
                 }
 
-                for (Integer ssrc : rtxGroups.keySet())
+                for (Long ssrc : rtxGroups.keySet())
                 {
                     ssrc2red.put(ssrc, pt);
                 }
             }
             else if (Constants.ULPFEC.equals(encoding))
             {
-                for (Integer ssrc : ssrcGroup)
+                for (Long ssrc : ssrcGroup)
                 {
                     ssrc2fec.put(ssrc, pt);
                 }
 
-                for (Integer ssrc : rtxGroups.keySet())
+                for (Long ssrc : rtxGroups.keySet())
                 {
                     ssrc2fec.put(ssrc, pt);
                 }
@@ -1247,5 +1328,133 @@ public class VideoChannel
     public void setAdaptiveSimulcast(boolean adaptiveSimulcast)
     {
         lastNController.setAdaptiveSimulcast(adaptiveSimulcast);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    protected void dominantSpeakerChanged()
+    {
+        Endpoint dominantEndpoint = conferenceSpeechActivity.getDominantEndpoint();
+
+        if (getEndpoint().equals(dominantEndpoint))
+        {
+            // We are the new dominant speaker. We expect other endpoints to
+            // mark us as a selected endpoint as soon as they receive the
+            // notification.
+
+            if (getContent().getChannelCount() < 3)
+            {
+                // If there is only one other endpoint in the conference, it
+                // already has us selected.
+                return;
+            }
+
+            long senderRtt = getRtt();
+            long maxReceiverRtt = getMaxReceiverDelay();
+
+            if (maxReceiverRtt > 0 && senderRtt > 0)
+            {
+                // We add an additional 10ms delay to reduce the risk of the kf
+                // arriving too early.
+                long firDelay = maxReceiverRtt - senderRtt + 10;
+                if (logger.isInfoEnabled())
+                {
+                    logger.info("Scheduling a keyframe request for endpoint "
+                                    + getEndpoint().getID() + " with a delay of "
+                                    + firDelay + "ms.");
+                }
+                scheduleFir(firDelay);
+            }
+        }
+        else
+        {
+            synchronized (delayedFirTaskSyncRoot)
+            {
+                if (delayedFirTask != null)
+                {
+                    delayedFirTask.cancel();
+                }
+            }
+        }
+    }
+
+    /**
+     * @return the RTT in milliseconds.
+     */
+    private long getRtt()
+    {
+        long rtt = -1;
+        MediaStream stream = getStream();
+        if (stream != null)
+        {
+            rtt = stream.getMediaStreamStats().getReceiveStats().getRtt();
+        }
+        return rtt;
+    }
+
+    /**
+     * @return the maximum round trip time in milliseconds from other video
+     * channels in this channel's content.
+     */
+    private long getMaxReceiverDelay()
+    {
+        long maxRtt = -1;
+        for (Channel channel : getContent().getChannels())
+        {
+            if (channel instanceof VideoChannel && !this.equals(channel))
+            {
+                long rtt = ((VideoChannel) channel).getRtt();
+                if (maxRtt < rtt)
+                    maxRtt = rtt;
+            }
+        }
+
+        return maxRtt;
+    }
+
+    /**
+     * Schedules a FIR to be sent to the remote side for the SSRC of the high
+     * quality simulcast stream, after a delay given in milliseconds.
+     * @param delay the delay in milliseconds before the FIR is to be sent.
+     */
+    private void scheduleFir(final long delay)
+    {
+        TimerTask task = new TimerTask()
+        {
+            @Override
+            public void run()
+            {
+                if (isExpired())
+                    return;
+
+                SimulcastReceiver simulcastReceiver
+                    = getTransformEngine().getSimulcastEngine()
+                            .getSimulcastReceiver();
+                SimulcastStream[] streams
+                    = simulcastReceiver.getSimulcastStreams();
+                if (streams != null && streams.length > 0)
+                {
+                    // The ssrc for the HQ layer.
+                    int ssrc
+                        = (int) streams[streams.length - 1].getPrimarySSRC();
+                    askForKeyframes(new int[]{ ssrc });
+                }
+            }
+        };
+
+        synchronized (delayedFirTaskSyncRoot)
+        {
+            if (delayedFirTask != null)
+            {
+                logger.warn("Canceling an existing delayed FIR task for "
+                                + "endpoint " + getEndpoint().getID() + ".");
+                delayedFirTask.cancel();
+            }
+            delayedFirTask = task;
+        }
+
+        delayedFirTimer.schedule(task, Math.max(0, delay));
     }
 }

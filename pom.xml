@@ -31,7 +31,7 @@
     <dependency>
       <groupId>io.callstats</groupId>
       <artifactId>callstats-java-sdk</artifactId>
-      <version>3.1.1</version>
+      <version>3.2.0</version>
     </dependency>
     <dependency>
       <groupId>com.googlecode.json-simple</groupId>
@@ -69,17 +69,17 @@
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>fmj</artifactId>
-      <version>1.0-20160225.164040-18</version>
+      <version>1.0-20160624.153910-20</version>
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>ice4j</artifactId>
-      <version>1.1-20160520.181520-12</version>
+      <version>1.1-20160906.210544-18</version>
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>jicoco</artifactId>
-      <version>1.0-20160307.212517-27</version>
+      <version>1.0-20160822.191856-34</version>
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>
@@ -150,7 +150,7 @@
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>libjitsi</artifactId>
-      <version>1.0-20160525.234658-167</version>
+      <version>1.0-20160921.232657-191</version>
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>

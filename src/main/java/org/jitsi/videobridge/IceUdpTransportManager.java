@@ -75,10 +75,11 @@ public class IceUdpTransportManager
     private static final int SINGLE_PORT_DEFAULT_VALUE = 10000;
 
     /**
-     * The <tt>Logger</tt> used by the <tt>IceUdpTransportManager</tt> class and
-     * its instances to print debug information.
+     * The {@link Logger} used by the {@link IceUdpTransportManager} class to
+     * print debug information. Note that instances should use {@link #logger}
+     * instead.
      */
-    private static final Logger logger
+    private static final Logger classLogger
         = Logger.getLogger(IceUdpTransportManager.class);
 
     /**
@@ -117,6 +118,18 @@ public class IceUdpTransportManager
         = "org.jitsi.videobridge.TCP_HARVESTER_SSLTCP";
 
     /**
+     * The name of the property that can be used to control the value of
+     * {@link #ICE_UFRAG_PREFIX}.
+     */
+    private static final String ICE_UFRAG_PREFIX_PNAME
+        = "org.jitsi.videobridge.ICE_UFRAG_PREFIX";
+
+    /**
+     * The optional prefix to use for generated ICE local username fragments.
+     */
+    private static String ICE_UFRAG_PREFIX;
+
+    /**
      * The default value of the <tt>TCP_HARVESTER_SSLTCP</tt> property.
      */
     private static final boolean TCP_HARVESTER_SSLTCP_DEFAULT = true;
@@ -138,22 +151,12 @@ public class IceUdpTransportManager
      * in the static fields {@link #tcpHostHarvester} and
      * {@link #singlePortHarvesters} have been initialized.
      */
-    private static boolean staticHarvestersInitialized = false;
+    private static boolean staticConfigurationInitialized = false;
 
     /**
      * The "mapped port" added to {@link #tcpHostHarvester}, or -1.
      */
     private static int tcpHostHarvesterMappedPort = -1;
-
-    /**
-     * Logs a specific <tt>String</tt> at debug level.
-     *
-     * @param s the <tt>String</tt> to log at debug level
-     */
-    private static void logd(String s)
-    {
-        logger.info(s);
-    }
 
     /**
      * The single (if any) <tt>Channel</tt> instance, whose sockets are
@@ -262,6 +265,12 @@ public class IceUdpTransportManager
     private SctpConnection sctpConnection = null;
 
     /**
+     * The {@link Logger} to be used by this instance to print debug
+     * information.
+     */
+    private final Logger logger;
+
+    /**
      * Initializes a new <tt>IceUdpTransportManager</tt> instance.
      *
      * @param conference the <tt>Conference</tt> which created this
@@ -308,6 +317,7 @@ public class IceUdpTransportManager
         this.controlling = controlling;
         this.numComponents = numComponents;
         this.rtcpmux = numComponents == 1;
+        this.logger = Logger.getLogger(classLogger, conference.getLogger());
 
         dtlsControl = createDtlsControl();
 
@@ -318,7 +328,9 @@ public class IceUdpTransportManager
 
         EventAdmin eventAdmin = conference.getEventAdmin();
         if (eventAdmin != null)
+        {
             eventAdmin.sendEvent(EventFactory.transportCreated(this));
+        }
     }
 
     /**
@@ -356,7 +368,8 @@ public class IceUdpTransportManager
                 && sctpConnection != null
                 && sctpConnection != channel)
         {
-            logd("Not adding a second SctpConnection to TransportManager.");
+            logger.info(
+                "Not adding a second SctpConnection to TransportManager.");
             return false;
         }
 
@@ -404,7 +417,9 @@ public class IceUdpTransportManager
 
         EventAdmin eventAdmin = conference.getEventAdmin();
         if (eventAdmin != null)
+        {
             eventAdmin.sendEvent(EventFactory.transportChannelAdded(channel));
+        }
 
         return true;
     }
@@ -516,7 +531,7 @@ public class IceUdpTransportManager
             // the order of the binding is important at the time of this
             // writing. That's why TcpHarvester is left to initialize as late as
             // possible right now.
-            initializeStaticHarvesters(cfg);
+            initializeStaticConfiguration(cfg);
 
             if (tcpHostHarvester != null)
                 iceAgent.addCandidateHarvester(tcpHostHarvester);
@@ -748,7 +763,8 @@ public class IceUdpTransportManager
             }
             catch (IOException ioe)
             {
-                logd("Failed to close sockets when closing a channel:" + ioe);
+                logger.info(
+                    "Failed to close sockets when closing a channel:" + ioe);
             }
 
             EventAdmin eventAdmin = conference.getEventAdmin();
@@ -823,7 +839,7 @@ public class IceUdpTransportManager
             = ServiceUtils.getService(
                     getBundleContext(),
                     NetworkAddressManagerService.class);
-        Agent iceAgent = nams.createIceAgent();
+        Agent iceAgent = new Agent(logger.getLevel(), ICE_UFRAG_PREFIX);
 
         //add videobridge specific harvesters such as a mapping and an Amazon
         //AWS EC2 harvester
@@ -1021,7 +1037,7 @@ public class IceUdpTransportManager
 
         DtlsFingerprintPacketExtension fingerprintPE
             = transportPE.getFirstChildOfType(
-                    DtlsFingerprintPacketExtension.class);
+            DtlsFingerprintPacketExtension.class);
 
         if (fingerprintPE == null)
         {
@@ -1186,12 +1202,12 @@ public class IceUdpTransportManager
     }
 
     /**
-     * Gets the <tt>Agent</tt> which implements the ICE protocol and which is
-     * used by this instance to implement the Jingle ICE-UDP transport.
+     * Gets the ICE local username fragment.
      */
-    public Agent getAgent()
+    public String getLocalUfrag()
     {
-        return iceAgent;
+        Agent iceAgent = this.iceAgent;
+        return iceAgent == null ? null : iceAgent.getLocalUfrag();
     }
 
     /**
@@ -1654,7 +1670,7 @@ public class IceUdpTransportManager
             s.append(")  of conference ").append(conference.getID())
                 .append(" changed from ").append(oldState).append(" to ")
                 .append(newState).append(".");
-            logd(s.toString());
+            logger.info(s.toString());
 
             EventAdmin eventAdmin = conference.getEventAdmin();
             if (eventAdmin != null)
@@ -1696,7 +1712,7 @@ public class IceUdpTransportManager
             // TODO we might not necessarily want to keep all channels alive by
             // the ICE connection.
             for (Channel channel : getChannels())
-                channel.touch();
+                channel.touch(Channel.ActivityType.TRANSPORT);
         }
     }
 
@@ -1709,13 +1725,17 @@ public class IceUdpTransportManager
      * configurable properties of the behavior/logic of the method
      * implementation
      */
-    static void initializeStaticHarvesters(ConfigurationService cfg)
+    static void initializeStaticConfiguration(ConfigurationService cfg)
     {
         synchronized (IceUdpTransportManager.class)
         {
-            if (staticHarvestersInitialized)
+            if (staticConfigurationInitialized)
+            {
                 return;
-            staticHarvestersInitialized = true;
+            }
+            staticConfigurationInitialized = true;
+
+            ICE_UFRAG_PREFIX = cfg.getString(ICE_UFRAG_PREFIX_PNAME, null);
 
             int singlePort = cfg.getInt(SINGLE_PORT_HARVESTER_PORT,
                                         SINGLE_PORT_DEFAULT_VALUE);
@@ -1726,7 +1746,7 @@ public class IceUdpTransportManager
                 if (singlePortHarvesters.isEmpty())
                 {
                     singlePortHarvesters = null;
-                    logger.info("No single-port harvesters created.");
+                    classLogger.info("No single-port harvesters created.");
                 }
             }
 
@@ -1749,7 +1769,7 @@ public class IceUdpTransportManager
                 }
                 catch (IOException ioe)
                 {
-                    logger.warn(
+                    classLogger.warn(
                             "Failed to initialize TCP harvester on port " + port
                                 + ": " + ioe
                                 + (fallback
@@ -1774,16 +1794,16 @@ public class IceUdpTransportManager
                     }
                     catch (IOException ioe)
                     {
-                        logger.warn(
+                        classLogger.warn(
                                 "Failed to initialize TCP harvester on fallback"
                                     + " port " + port + ": " + ioe);
                         return;
                     }
                 }
 
-                if (logger.isInfoEnabled())
+                if (classLogger.isInfoEnabled())
                 {
-                    logger.info("Initialized TCP harvester on port " + port
+                    classLogger.info("Initialized TCP harvester on port " + port
                                         + ", using SSLTCP:" + ssltcp);
                 }
 
@@ -1819,12 +1839,58 @@ public class IceUdpTransportManager
     {
         iceConnected = true;
 
+        Transport transport = getTransport();
+        if (transport == null)
+        {
+            logger.warn("Cannot get transport type.");
+        }
+        else
+        {
+            Conference.Statistics statistics = conference.getStatistics();
+            if (transport == Transport.TCP || transport == Transport.SSLTCP)
+            {
+                statistics.totalTcpTransportManagers.incrementAndGet();
+            }
+            else if (transport == Transport.UDP)
+            {
+                statistics.totalUdpTransportManagers.incrementAndGet();
+            }
+        }
+
         EventAdmin eventAdmin = conference.getEventAdmin();
         if (eventAdmin != null)
+        {
             eventAdmin.sendEvent(EventFactory.transportConnected(this));
+        }
 
         for (Channel channel : getChannels())
+        {
             channel.transportConnected();
+        }
+    }
+
+    /**
+     * @return the {@link Transport} (e.g. UDP or TCP) of the selected pair
+     * of this {@link IceUdpTransportManager}. If the transport manager is
+     currently not connected, returns {@code null}.
+     */
+    private Transport getTransport()
+    {
+        Transport transport = null;
+
+        Component component = iceStream.getComponent(Component.RTP);
+        if (component != null)
+        {
+            CandidatePair selectedPair = component.getSelectedPair();
+            if (selectedPair != null)
+            {
+                transport
+                    = selectedPair.getLocalCandidate().getHostAddress()
+                            .getTransport();
+            }
+        }
+
+        return transport;
     }
 
     /**
@@ -1980,7 +2046,8 @@ public class IceUdpTransportManager
                         }
                         catch (OperationFailedException ofe)
                         {
-                            logd("Failed to connect IceUdpTransportManager: "
+                            logger.info(
+                                "Failed to connect IceUdpTransportManager: "
                                          + ofe);
 
                             synchronized (connectThreadSyncRoot)
@@ -1991,7 +2058,7 @@ public class IceUdpTransportManager
                         }
 
                         // XXX The value of the field iceAgent is null at times.
-                        Agent iceAgent = getAgent();
+                        Agent iceAgent = IceUdpTransportManager.this.iceAgent;
 
                         if (iceAgent == null)
                         {
@@ -2001,8 +2068,7 @@ public class IceUdpTransportManager
 
                         IceProcessingState state = iceAgent.getState();
 
-                        if (IceProcessingState.COMPLETED.equals(state)
-                                || IceProcessingState.TERMINATED.equals(state))
+                        if (state.isEstablished())
                         {
                             onIceConnected();
                         }

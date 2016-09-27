@@ -15,7 +15,9 @@
  */
 package org.jitsi.videobridge.eventadmin.callstats;
 
+import java.lang.ref.*;
 import java.util.*;
+import java.util.concurrent.*;
 
 import io.callstats.sdk.*;
 import io.callstats.sdk.data.*;
@@ -23,6 +25,7 @@ import io.callstats.sdk.listeners.*;
 
 import org.jitsi.eventadmin.*;
 import org.jitsi.service.neomedia.*;
+import org.jitsi.service.neomedia.stats.*;
 import org.jitsi.util.*;
 import org.jitsi.util.concurrent.*;
 import org.jitsi.videobridge.*;
@@ -50,6 +53,14 @@ class CallStatsConferenceStatsHandler
     private static final MediaType[] MEDIA_TYPES
         = { MediaType.AUDIO, MediaType.VIDEO };
 
+    /**
+     * The {@link RecurringProcessibleExecutor} which periodically invokes
+     * generating and pushing statistics per conference for every Channel.
+     */
+    private static final RecurringProcessibleExecutor statisticsExecutor
+        = new RecurringProcessibleExecutor(
+        CallStatsConferenceStatsHandler.class.getSimpleName()
+            + "-statisticsExecutor");
 
     /**
      * The entry point into the callstats.io (Java) library.
@@ -67,21 +78,12 @@ class CallStatsConferenceStatsHandler
     private String conferenceIDPrefix;
 
     /**
-     * The {@link RecurringProcessibleExecutor} which periodically invokes
-     * generating and pushing statistics per conference for every Channel.
-     */
-    private final RecurringProcessibleExecutor statisticsExecutor
-        = new RecurringProcessibleExecutor(
-            CallStatsConferenceStatsHandler.class.getSimpleName()
-                + "-statisticsExecutor");
-
-    /**
      * List of the processor per conference. Kept in order to stop and
      * deRegister them from the executor.
      */
     private final Map<Conference,ConferencePeriodicProcessible>
         statisticsProcessors
-            = new HashMap<>();
+            = new ConcurrentHashMap<>();
 
     /**
      * The interval to poll for stats and to push them to the callstats service.
@@ -166,8 +168,11 @@ class CallStatsConferenceStatsHandler
         // Create a new PeriodicProcessible and start it.
         ConferencePeriodicProcessible cpp
             = new ConferencePeriodicProcessible(conference, interval);
-
         cpp.start();
+
+        // register for periodic execution.
+        this.statisticsProcessors.put(conference, cpp);
+        this.statisticsExecutor.registerRecurringProcessible(cpp);
     }
 
     /**
@@ -205,7 +210,7 @@ class CallStatsConferenceStatsHandler
          * The user info object used to identify the reports to callstats. Holds
          * the conference, the bridgeID and user callstats ID.
          */
-        private UserInfo userInfo;
+        private UserInfo userInfo = null;
 
         /**
          * The conference ID to use when reporting stats.
@@ -241,6 +246,12 @@ class CallStatsConferenceStatsHandler
         @Override
         protected void doProcess()
         {
+            // if userInfo is missing the method conferenceSetupResponse
+            // is not called, means callstats still has not setup internally
+            // this conference, and no stats will be processed for it
+            if(userInfo == null)
+                return;
+
             for (Endpoint e : o.getEndpoints())
             {
                 for (MediaType mediaType : MEDIA_TYPES)
@@ -266,31 +277,7 @@ class CallStatsConferenceStatsHandler
             callStats.sendCallStatsConferenceEvent(
                     CallStatsConferenceEvents.CONFERENCE_SETUP,
                     conferenceInfo,
-                    new CallStatsStartConferenceListener()
-                    {
-                        @Override
-                        public void onResponse(String ucid)
-                        {
-                            userInfo
-                                = new UserInfo(conferenceID, bridgeId, ucid);
-                            // Successful setup from callstats' perspective. Add
-                            // it to statisticsProcessors map and register it
-                            // for periodic execution.
-                            statisticsProcessors.put(
-                                    o,
-                                    ConferencePeriodicProcessible.this);
-                            statisticsExecutor.registerRecurringProcessible(
-                                    ConferencePeriodicProcessible.this);
-                        }
-
-                        @Override
-                        public void onError(
-                                CallStatsErrors callStatsErrors,
-                                String s)
-                        {
-                            logger.error(s + "," + callStatsErrors);
-                        }
-                    });
+                    new CSStartConferenceListener(new WeakReference<>(this)));
         }
 
         /**
@@ -301,6 +288,17 @@ class CallStatsConferenceStatsHandler
             callStats.sendCallStatsConferenceEvent(
                     CallStatsConferenceEvents.CONFERENCE_TERMINATED,
                     userInfo);
+        }
+
+        /**
+         * Callstats has finished setting up the conference and we can start
+         * sending stats.
+         * @param ucid the id used to identify the conference inside callstats.
+         */
+        void conferenceSetupResponse(String ucid)
+        {
+            userInfo
+                = new UserInfo(conferenceID, bridgeId, ucid);
         }
 
         /**
@@ -324,7 +322,7 @@ class CallStatsConferenceStatsHandler
             if (stream == null)
                 return;
 
-            MediaStreamStats stats = stream.getMediaStreamStats();
+            MediaStreamStats2 stats = stream.getMediaStreamStats();
             if (stats == null)
                 return;
 
@@ -336,44 +334,89 @@ class CallStatsConferenceStatsHandler
                     this.conferenceID);
 
             // Send stats for received streams.
-            for (MediaStreamSSRCStats receivedStat : stats.getReceivedStats())
+            for (ReceiveTrackStats receiveStat : stats.getAllReceiveStats())
             {
                 ConferenceStats conferenceStats
                     = new ConferenceStatsBuilder()
-                        .bytesSent(receivedStat.getNbBytes())
-                        .packetsSent(receivedStat.getNbPackets())
-                        .ssrc(String.valueOf(receivedStat.getSSRC()))
+                        .bytesSent(receiveStat.getBytes())
+                        .packetsSent(receiveStat.getPackets())
+                        .ssrc(String.valueOf(receiveStat.getSSRC()))
                         .confID(this.conferenceID)
                         .localUserID(bridgeId)
                         .remoteUserID(endpointID)
                         .statsType(CallStatsStreamType.INBOUND)
-                        .jitter(receivedStat.getJitter())
-                        .rtt((int) receivedStat.getRttMs())
+                        // XXX Note that we take these two from the global stats
+                        .jitter(stats.getReceiveStats().getJitter())
+                        .rtt((int) stats.getReceiveStats().getRtt())
                         .ucID(userInfo.getUcID())
                         .build();
                 callStats.reportConferenceStats(endpointID, conferenceStats);
             }
 
             // Send stats for sent streams.
-            for (MediaStreamSSRCStats sentStat : stats.getSentStats())
+            for (SendTrackStats sendStat : stats.getAllSendStats())
             {
                 ConferenceStats conferenceStats
                     = new ConferenceStatsBuilder()
-                        .bytesSent(sentStat.getNbBytes())
-                        .packetsSent(sentStat.getNbPackets())
-                        .ssrc(String.valueOf(sentStat.getSSRC()))
+                        .bytesSent(sendStat.getBytes())
+                        .packetsSent(sendStat.getPackets())
+                        .ssrc(String.valueOf(sendStat.getSSRC()))
                         .confID(this.conferenceID)
                         .localUserID(bridgeId)
                         .remoteUserID(endpointID)
                         .statsType(CallStatsStreamType.OUTBOUND)
-                        .jitter(sentStat.getJitter())
-                        .rtt((int) sentStat.getRttMs())
+                        // XXX Note that we take these two from the global stats
+                        .jitter(stats.getSendStats().getJitter())
+                        .rtt((int) stats.getSendStats().getRtt())
                         .ucID(userInfo.getUcID())
                         .build();
                 callStats.reportConferenceStats(endpointID, conferenceStats);
             }
 
             callStats.stopStatsReportingForUser(endpointID, this.conferenceID);
+        }
+    }
+
+    /**
+     * Listener that get notified when conference had been processed
+     * by callstats and we have the identifier for it and we can start sending
+     * stats for it.
+     */
+    private static class CSStartConferenceListener
+        implements CallStatsStartConferenceListener
+    {
+        /**
+         * Weak reference for the ConferencePeriodicProcessible, to make sure
+         * if this listener got leaked somwehere in callstats we will not keep
+         * reference to conferences and such.
+         */
+        private final WeakReference<ConferencePeriodicProcessible> processible;
+
+        /**
+         * Creates listener.
+         * @param processible the processible interested in ucid value on
+         * successful setup of conference in callstats.
+         */
+        CSStartConferenceListener(
+            WeakReference<ConferencePeriodicProcessible> processible)
+        {
+            this.processible = processible;
+        }
+
+        @Override
+        public void onResponse(String ucid)
+        {
+            ConferencePeriodicProcessible p = processible.get();
+
+            // maybe null cause it was garbage collected
+            if(p != null)
+                p.conferenceSetupResponse(ucid);
+        }
+
+        @Override
+        public void onError(CallStatsErrors callStatsErrors, String s)
+        {
+            logger.error(s + "," + callStatsErrors);
         }
     }
 }

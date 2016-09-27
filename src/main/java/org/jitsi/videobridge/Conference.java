@@ -21,6 +21,8 @@ import java.lang.ref.*;
 import java.lang.reflect.*;
 import java.text.*;
 import java.util.*;
+import java.util.concurrent.atomic.*;
+import java.util.logging.*;
 
 import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
 import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.ColibriConferenceIQ.Recording.*;
@@ -57,10 +59,11 @@ public class Conference
         = Conference.class.getName() + ".endpoints";
 
     /**
-     * The <tt>Logger</tt> used by the <tt>Conference</tt> class and its
-     * instances to print debug information.
+     * The {@link Logger} used by the {@link Conference} class to print debug
+     * information. Note that {@link Conference} instances should use {@link
+     * #logger} instead.
      */
-    private static final Logger logger = Logger.getLogger(Conference.class);
+    private static final Logger classLogger = Logger.getLogger(Conference.class);
 
     /**
      * The <tt>Content</tt>s of this <tt>Conference</tt>.
@@ -76,7 +79,7 @@ public class Conference
     /**
      * The <tt>Endpoint</tt>s participating in this <tt>Conference</tt>.
      */
-    private final List<WeakReference<Endpoint>> endpoints = new LinkedList<>();
+    private final List<Endpoint> endpoints = new LinkedList<>();
 
     /**
      * The {@link EventAdmin} instance (to be) used by this {@code Conference}
@@ -172,6 +175,11 @@ public class Conference
     private final Videobridge videobridge;
 
     /**
+     * Holds conference statistics.
+     */
+    private Statistics statistics = new Statistics();
+
+    /**
      * The <tt>WebRtcpDataStreamListener</tt> which listens to the
      * <tt>SctpConnection</tt>s of the <tt>Endpoint</tt>s participating in this
      * multipoint conference in order to detect when they are ready (to fire
@@ -192,6 +200,22 @@ public class Conference
                 };
 
     /**
+     * The {@link Logger} to be used by this instance to print debug
+     * information.
+     */
+    private final Logger logger = Logger.getLogger(classLogger, null);
+
+    /**
+     * Whether this conference should be considered when generating statistics.
+     */
+    private final boolean includeInStatistics;
+
+    /**
+     * The time when this {@link Conference} was created.
+     */
+    private final long creationTime = System.currentTimeMillis();
+
+    /**
      * Initializes a new <tt>Conference</tt> instance which is to represent a
      * conference in the terms of Jitsi Videobridge which has a specific
      * (unique) ID and is managed by a conference focus with a specific JID.
@@ -204,15 +228,15 @@ public class Conference
      * to manage the new instance must come or they will be ignored.
      * Pass <tt>null</tt> to override this safety check.
      * @param name world readable name of this instance if any.
-     * @param eventAdmin the {@code EventAdmin} instance to be used by the new
-     * instance and all instances (of {@code Content}, {@code Channel}, etc.)
-     * created by it.
+     * @param enableLogging whether logging should be enabled for this
+     * {@link Conference} and its sub-components, and whether this conference
+     * should be considered when generating statistics.
      */
     public Conference(Videobridge videobridge,
                       String id,
                       String focus,
                       String name,
-                      EventAdmin eventAdmin)
+                      boolean enableLogging)
     {
         if (videobridge == null)
             throw new NullPointerException("videobridge");
@@ -222,17 +246,47 @@ public class Conference
         this.videobridge = videobridge;
         this.id = id;
         this.focus = focus;
-        this.eventAdmin = eventAdmin;
+        this.eventAdmin = enableLogging ? videobridge.getEventAdmin() : null;
+        this.includeInStatistics = enableLogging;
         this.name = name;
+
+        if (!enableLogging)
+        {
+            logger.setLevel(Level.WARNING);
+        }
 
         lastKnownFocus = focus;
 
         speechActivity = new ConferenceSpeechActivity(this);
         speechActivity.addPropertyChangeListener(propertyChangeListener);
 
-        if (eventAdmin != null)
+        if (enableLogging)
+        {
             eventAdmin.sendEvent(EventFactory.conferenceCreated(this));
+            Videobridge.Statistics videobridgeStatistics
+                = videobridge.getStatistics();
+            videobridgeStatistics.totalConferencesCreated.incrementAndGet();
+        }
     }
+
+    /**
+     * Gets the statistics of this {@link Conference}.
+     *
+     * @return the statistics of this {@link Conference}.
+     */
+    public Statistics getStatistics()
+    {
+        return statistics;
+    }
+
+    /**
+     * @return whether this conference should be included in generated
+     * statistics.
+     */
+     public boolean includeInStatistics()
+     {
+         return includeInStatistics;
+     }
 
     /**
      * Used to send a message to a subset of endpoints in the call, primary use
@@ -263,7 +317,7 @@ public class Conference
      *
      * @param msg the message to be advertised across conference peers.
      */
-    private void broadcastMessageOnDataChannels(String msg)
+    public void broadcastMessageOnDataChannels(String msg)
     {
         sendMessageOnDataChannels(msg, getEndpoints());
     }
@@ -481,15 +535,14 @@ public class Conference
     {
         Endpoint dominantSpeaker = speechActivity.getDominantEndpoint();
 
-        if (logger.isTraceEnabled())
+        if (logger.isInfoEnabled())
         {
-            logger.trace(
-                    "The dominant speaker in conference " + getID()
-                        + " is now the endpoint "
-                        + ((dominantSpeaker == null)
-                            ? "(null)"
-                            : dominantSpeaker.getID())
-                        + ".");
+            logger.info("The dominant speaker in conference " + getID()
+                            + " is now the endpoint "
+                            + ((dominantSpeaker == null)
+                ? "(null)"
+                : dominantSpeaker.getID())
+                            + ".");
         }
 
         if (dominantSpeaker != null)
@@ -544,11 +597,10 @@ public class Conference
         if (maybeRemoveEndpoint)
         {
             // It looks like there is a chance that the Endpoint may have
-            // expired. Endpoints are held by this Conference via WeakReferences
-            // but WeakReferences are unpredictable. We have functionality
-            // though which could benefit from discovering that an Endpoint has
-            // expired as quickly as possible (e.g. ConferenceSpeechActivity).
-            // Consequently, try to expedite the removal of expired Endpoints.
+            // expired. We have functionality though which could benefit from
+            // discovering that an Endpoint has expired as quickly as possible
+            // (e.g. ConferenceSpeechActivity). Consequently, try to expedite
+            // the removal of expired Endpoints.
             if (endpoint.getSctpConnection() == null
                     && endpoint.getChannelCount(null) == 0)
             {
@@ -649,12 +701,85 @@ public class Conference
             // TransportManager and then the TransportManager will not close.
             closeTransportManagers();
 
-            if (logger.isInfoEnabled())
+            if (includeInStatistics)
             {
-                logger.info(
-                        "Expired conference " + getID()
-                            + ". " + videobridge.getConferenceCountString());
+                updateStatisticsOnExpire();
             }
+        }
+    }
+
+    /**
+     * Updates the statistics for this conference when it is about to expire.
+     */
+    private void updateStatisticsOnExpire()
+    {
+        long durationSeconds
+            = Math.round(
+            (System.currentTimeMillis() - creationTime) / 1000d);
+
+        Videobridge.Statistics videobridgeStatistics
+            = getVideobridge().getStatistics();
+
+        videobridgeStatistics.totalConferencesCompleted
+            .incrementAndGet();
+        videobridgeStatistics.totalConferenceSeconds.addAndGet(
+            durationSeconds);
+        videobridgeStatistics.totalUdpTransportManagers.addAndGet(
+            statistics.totalUdpTransportManagers.get());
+        videobridgeStatistics.totalTcpTransportManagers.addAndGet(
+            statistics.totalTcpTransportManagers.get());
+
+        videobridgeStatistics.totalNoPayloadChannels.addAndGet(
+            statistics.totalNoPayloadChannels.get());
+        videobridgeStatistics.totalNoTransportChannels.addAndGet(
+            statistics.totalNoTransportChannels.get());
+
+        videobridgeStatistics.totalChannels.addAndGet(
+            statistics.totalChannels.get());
+
+        boolean hasFailed
+            = statistics.totalNoPayloadChannels.get()
+            >= statistics.totalChannels.get();
+        boolean hasPartiallyFailed
+            = statistics.totalNoPayloadChannels.get() != 0;
+
+        if (hasPartiallyFailed)
+        {
+            videobridgeStatistics.totalPartiallyFailedConferences
+                .incrementAndGet();
+        }
+
+        if (hasFailed)
+        {
+            videobridgeStatistics.totalFailedConferences
+                .incrementAndGet();
+        }
+
+        if (logger.isInfoEnabled())
+        {
+
+            int[] metrics
+                = videobridge.getConferenceChannelAndStreamCount();
+
+            logger.info(
+                "Expired conference id=" + getID()
+                    + ", duration=" + durationSeconds + "s; "
+                    + "conferenceCount="
+                    + metrics[0]
+                    + ", channelCount="
+                    + metrics[1]
+                    + ", video streams="
+                    + metrics[2]
+                    + ", totalConferencesCompleted="
+                    + videobridgeStatistics.totalConferencesCompleted
+                    + ", totalNoPayloadChannels="
+                    + videobridgeStatistics.totalNoPayloadChannels
+                    + ", totalNoTransportChannels="
+                    + videobridgeStatistics.totalNoTransportChannels
+                    + ", totalChannels="
+                    + videobridgeStatistics.totalChannels
+                    + ", hasFailed=" + hasFailed
+                    + ", hasPartiallyFailed=" + hasPartiallyFailed);
         }
     }
 
@@ -792,12 +917,11 @@ public class Conference
 
         synchronized (endpoints)
         {
-            for (Iterator<WeakReference<Endpoint>> i = endpoints.iterator();
-                    i.hasNext();)
+            for (Iterator<Endpoint> i = endpoints.iterator(); i.hasNext();)
             {
-                Endpoint e = i.next().get();
+                Endpoint e = i.next();
 
-                if (e == null)
+                if (e.isExpired())
                 {
                     i.remove();
                     changed = true;
@@ -815,7 +939,7 @@ public class Conference
                 // Conference and will unregister itself from the endpoint
                 // sooner or later.
                 endpoint.addPropertyChangeListener(propertyChangeListener);
-                endpoints.add(new WeakReference<>(endpoint));
+                endpoints.add(endpoint);
                 changed = true;
 
                 EventAdmin eventAdmin = getEventAdmin();
@@ -883,13 +1007,11 @@ public class Conference
         synchronized (this.endpoints)
         {
             endpoints = new ArrayList<>(this.endpoints.size());
-            for (Iterator<WeakReference<Endpoint>> i
-                        = this.endpoints.iterator();
-                    i.hasNext();)
+            for (Iterator<Endpoint> i = this.endpoints.iterator(); i.hasNext();)
             {
-                Endpoint endpoint = i.next().get();
+                Endpoint endpoint = i.next();
 
-                if (endpoint == null)
+                if (endpoint.isExpired())
                 {
                     i.remove();
                     changed = true;
@@ -1059,13 +1181,9 @@ public class Conference
                                     getRecordingPath() + "/metadata.json"));
                 t = null;
             }
-            catch (IOException ioe)
+            catch (IOException | IllegalArgumentException e)
             {
-                t = ioe;
-            }
-            catch (IllegalArgumentException iae)
-            {
-                t = iae;
+                t = e;
             }
             if (t !=  null)
                 logger.warn("Could not create RecorderEventHandler. " + t);
@@ -1153,7 +1271,9 @@ public class Conference
      */
     TransportManager getTransportManager(String channelBundleId)
     {
-        return getTransportManager(channelBundleId, false);
+        // If create is false then initiator parametr will not be used.
+        // So here it doesnt matter it is true, or false.
+        return getTransportManager(channelBundleId, false, true);
     }
 
     /**
@@ -1164,12 +1284,14 @@ public class Conference
      * @param channelBundleId the ID of the channel-bundle for which to return
      * the <tt>TransportManager</tt>.
      * @param create whether to create a new instance, if one doesn't exist.
+     * @param initiator determines ICE controlling/controlled and DTLS role. 
      * @return the <tt>TransportManager</tt> instance for the channel-bundle
      * with ID <tt>channelBundleId</tt>.
      */
     IceUdpTransportManager getTransportManager(
             String channelBundleId,
-            boolean create)
+            boolean create,
+            boolean initiator)
     {
         IceUdpTransportManager transportManager;
 
@@ -1180,17 +1302,17 @@ public class Conference
             {
                 try
                 {
-                    //FIXME: the initiator is hard-coded
-                    // We assume rtcp-mux when bundle is used, so we make only
-                    // one component.
                     transportManager
-                        = new IceUdpTransportManager(this, true, 1);
+                        = new IceUdpTransportManager(this, initiator, 1);
                 }
                 catch (IOException ioe)
                 {
                     throw new UndeclaredThrowableException(ioe);
                 }
                 transportManagers.put(channelBundleId, transportManager);
+                logger.info("Created an ICE agent with local ufrag "
+                                + transportManager.getLocalUfrag()
+                                + " for endpoint " + channelBundleId + ". Is initiator: " + initiator + ".");
             }
         }
 
@@ -1312,12 +1434,11 @@ public class Conference
 
         synchronized (endpoints)
         {
-            for (Iterator<WeakReference<Endpoint>> i = endpoints.iterator();
-                    i.hasNext();)
+            for (Iterator<Endpoint> i = endpoints.iterator(); i.hasNext();)
             {
-                Endpoint e = i.next().get();
+                Endpoint e = i.next();
 
-                if (e == null || e == endpoint)
+                if (e.isExpired() || e == endpoint)
                 {
                     i.remove();
                     removed = true;
@@ -1392,6 +1513,12 @@ public class Conference
                  * implement it as well.
                  */
                 endpoint.sctpConnectionReady(sctpConnection);
+                // Trigger SCTP connection ready event
+                if (eventAdmin != null)
+                {
+                    eventAdmin.postEvent(
+                            EventFactory.endpointSctpConnReady(endpoint));
+                }
             }
         }
     }
@@ -1697,4 +1824,46 @@ public class Conference
     {
         return eventAdmin;
     }
+
+    /**
+     * @return the {@link Logger} used by this instance.
+     */
+    public Logger getLogger()
+    {
+        return logger;
+    }
+
+    /**
+     * Holds conference statistics.
+     */
+    class Statistics
+    {
+        /**
+         * The total number of channels where the transport failed to connect.
+         */
+        AtomicInteger totalNoTransportChannels = new AtomicInteger(0);
+
+        /**
+         * The total number of channels where there was no payload traffic.
+         */
+        AtomicInteger totalNoPayloadChannels = new AtomicInteger(0);
+
+        /**
+         * The total number of channels.
+         */
+        public AtomicInteger totalChannels = new AtomicInteger(0);
+
+        /**
+         * The total number of ICE transport managers of this conference which
+         * successfully connected over UDP.
+         */
+        AtomicInteger totalUdpTransportManagers = new AtomicInteger();
+
+        /**
+         * The total number of ICE transport managers of this conference which
+         * successfully connected over TCP.
+         */
+        AtomicInteger totalTcpTransportManagers = new AtomicInteger();
+    }
+
 }
