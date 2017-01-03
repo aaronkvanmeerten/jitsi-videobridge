@@ -15,9 +15,13 @@
  */
 package org.jitsi.videobridge.simulcast;
 
+import org.jitsi.impl.neomedia.rtp.*;
 import org.jitsi.service.configuration.*;
 import org.jitsi.impl.neomedia.*;
+import org.jitsi.service.neomedia.*;
 import org.jitsi.util.*;
+import org.jitsi.videobridge.*;
+
 import java.util.concurrent.*;
 
 import java.lang.ref.*;
@@ -185,7 +189,7 @@ public class SimulcastReceiver
      * @return a <tt>SimulcastStream</tt> that is the closest match to the
      * target order, or null.
      */
-    public SimulcastStream getSimulcastStream(int targetOrder)
+    public SimulcastStream getSimulcastStream(int targetOrder, MediaStream sender)
     {
         SimulcastStream[] simStreams = getSimulcastStreams();
         if (simStreams == null || simStreams.length == 0)
@@ -197,14 +201,30 @@ public class SimulcastReceiver
         // that matches the targetOrder parameter best.
         SimulcastStream next = simStreams[0];
 
+        StreamRTPManager streamRTPManager = sender.getStreamRTPManager();
+        if (streamRTPManager == null)
+        {
+            return next;
+        }
+
+        if (streamRTPManager.getRemoteClockEstimator()
+            .getRemoteClock(next.getPrimarySSRC()) == null)
+        {
+            return next;
+        }
+
         for (int i = 1, end = Math.min(targetOrder + 1, simStreams.length);
                 i < end;
                 i++)
         {
             SimulcastStream ss = simStreams[i];
 
-            if (ss.isStreaming())
+            if (ss.isStreaming() && streamRTPManager
+                .getRemoteClockEstimator()
+                .getRemoteClock(ss.getPrimarySSRC()) != null)
+            {
                 next = ss;
+            }
             else
                 break;
         }
@@ -273,14 +293,20 @@ public class SimulcastReceiver
         {
             if (newSimulcastStreams == null)
             {
-                logger.info("Simulcast disabled.");
+                logger.info(Logger.Category.STATISTICS,
+                            "simulcast_disabled " + getLoggingId());
             }
             else
             {
-                for (SimulcastStream l : newSimulcastStreams)
+                StringBuilder sb = new StringBuilder("simulcast_init,");
+                sb.append(getLoggingId()).append(" ");
+                for (SimulcastStream stream : newSimulcastStreams)
                 {
-                    logger.info(l.getOrder() + ": " + l.getPrimarySSRC());
+                    sb.append("order").append(stream.getOrder())
+                        .append("=").append(stream.getPrimarySSRC())
+                        .append(",");
                 }
+                logger.info(Logger.Category.STATISTICS, sb.toString());
             }
         }
 
@@ -405,7 +431,9 @@ public class SimulcastReceiver
             .getVideoChannel().getStream().isKeyFrame(
                 pkt.getBuffer(), pkt.getOffset(), pkt.getLength())))
         {
-            logger.info("Received a keyframe on SSRC=" + acceptedSSRC);
+            logger.info(Logger.Category.STATISTICS,
+                        "keyframe_received," + getLoggingId()
+                        + " ssrc=" + acceptedSSRC);
         }
 
         if (acceptedStream.lastPktTimestamp == -1 || TimeUtils
@@ -414,7 +442,7 @@ public class SimulcastReceiver
             if (acceptedStream.lastPktTimestamp == -1 || TimeUtils
                 .rtpDiff(acceptedStream.lastPktTimestamp, pktTimestamp) < 0)
             {
-                // The current pkt signals the receit of a piece of a new (i.e.
+                // The current pkt signals the receipt of a piece of a new (i.e.
                 // unobserved until now) frame.
                 acceptedStream.lastPktTimestamp = pktTimestamp;
                 frameStarted = true;
@@ -526,12 +554,12 @@ public class SimulcastReceiver
 
             if (logger.isDebugEnabled())
             {
-                logger.debug(
-                    "order-" + acceptedStream.getOrder() + " stream (" +
-                        acceptedStream.getPrimarySSRC()
-                        + ") resumed on seqnum " + pkt.getSequenceNumber()
-                        + ", " + "isKeyFrame="
-                        + (isKeyFrame == null ? "null" : isKeyFrame) + ".");
+                logger.debug(Logger.Category.STATISTICS,
+                             "resumed," + getLoggingId()
+                             + " order=" + acceptedStream.getOrder()
+                             + ",ssrc=" + acceptedStream.getPrimarySSRC()
+                             + ",seq=" + pkt.getSequenceNumber()
+                             + ",is_key=" + isKeyFrame);
             }
 
             changedStreams.add(acceptedStream);
@@ -654,8 +682,10 @@ public class SimulcastReceiver
                 {
                     if (logger.isDebugEnabled())
                     {
-                        logger.debug("Asking for a key frame for "
-                                + simulcastStream.getPrimarySSRC());
+                        logger.debug(Logger.Category.STATISTICS,
+                                     "request_keyframe," + getLoggingId()
+                                     + " ssrc="
+                                         + simulcastStream.getPrimarySSRC());
                     }
                 }
 
@@ -778,6 +808,16 @@ public class SimulcastReceiver
         // key frame.
         executorService.execute(
             new SimulcastStreamsChangedRunnable(simulcastStreams));
+    }
+
+    /**
+     * @return a string which identifies this {@link SimulcastReceiver} (i.e.
+     * its corresponding {@link VideoChannel}) for the purposes of logging.
+     * The string is a comma-separated list of "key=value" pairs.
+     */
+    private String getLoggingId()
+    {
+        return RtpChannel.getLoggingId(getSimulcastEngine().getVideoChannel());
     }
 
     /**

@@ -19,6 +19,7 @@ import java.beans.*;
 import java.io.*;
 import java.net.*;
 import java.util.*;
+import java.util.concurrent.atomic.*;
 
 import javax.media.rtp.*;
 
@@ -41,6 +42,7 @@ import org.jitsi.service.neomedia.codec.*;
 import org.jitsi.service.neomedia.device.*;
 import org.jitsi.service.neomedia.format.*;
 import org.jitsi.service.neomedia.recording.*;
+import org.jitsi.service.neomedia.stats.*;
 import org.jitsi.util.Logger;
 import org.jitsi.util.event.*;
 import org.jitsi.videobridge.transform.*;
@@ -193,6 +195,10 @@ public class RtpChannel
      * {@link #stream}. When <tt>DatagramPacket</tt>s are received through the
      * <tt>DatagramSocket</tt>s of this <tt>Channel</tt>, their first RTP and
      * RTCP sources will determine, respectively, the RTP and RTCP targets.
+     * Note: this is effectively used for RAW UDP only. With ICE, ice4j takes
+     * care of verifying the source and setting the actual target for us.
+     * TODO: Maybe move this to RawUdpTransportManager (and stop using the
+     * SessionAddress class from FMJ).
      */
     private final SessionAddress streamTarget = new SessionAddress();
 
@@ -226,10 +232,18 @@ public class RtpChannel
     private byte rtxAssociatedPayloadType = -1;
 
     /**
-     * The payload type number configured for RED (RFC-2198) for this channel,
-     * or -1 if none is configured (the other end does not support red).
+     * Whether this {@link RtpChannel} should latch on to the remote address of
+     * the first received data packet (and control packet) and only received
+     * subsequent packets from this remote address.
+     * We want to enforce this if RAW-UDP is used. When ICE is used, ice4j does
+     * the filtering for us.
      */
-    private byte redPayloadType = -1;
+    private boolean verifyRemoteAddress = true;
+
+    /**
+     * The instance which holds statistics for this {@link RtpChannel}instance.
+     */
+    protected final Statistics statistics = new Statistics();
 
     /**
      * Initializes a new <tt>Channel</tt> instance which is to have a specific
@@ -288,6 +302,12 @@ public class RtpChannel
 
         content.addPropertyChangeListener(propertyChangeListener);
 
+        if (IceUdpTransportPacketExtension.NAMESPACE.equals(
+                        this.transportNamespace))
+        {
+            this.verifyRemoteAddress = false;
+        }
+
         touch();
     }
 
@@ -336,7 +356,8 @@ public class RtpChannel
         else
         {
             accept
-                = ctrlAddr.equals(p.getAddress()) && (ctrlPort == p.getPort());
+                = !verifyRemoteAddress ||
+                (ctrlAddr.equals(p.getAddress()) && (ctrlPort == p.getPort()));
         }
 
         if (accept)
@@ -435,7 +456,8 @@ public class RtpChannel
         else
         {
             accept
-                = dataAddr.equals(p.getAddress()) && (dataPort == p.getPort());
+                = !verifyRemoteAddress ||
+                (dataAddr.equals(p.getAddress()) && (dataPort == p.getPort()));
         }
 
         if (accept)
@@ -666,6 +688,11 @@ public class RtpChannel
     {
         if (!streamClosed)
         {
+            MediaStreamStats2 mss = stream.getMediaStreamStats();
+            statistics.bytesReceived = mss.getReceiveStats().getBytes();
+            statistics.bytesSent = mss.getSendStats().getBytes();
+            statistics.packetsReceived = mss.getReceiveStats().getPackets();
+            statistics.packetsSent = mss.getSendStats().getPackets();
             stream.setProperty(Channel.class.getName(), null);
             removeStreamListeners();
             stream.close();
@@ -895,7 +922,12 @@ public class RtpChannel
             stream.setName(getID());
             stream.setProperty(RtpChannel.class.getName(), this);
             if (transformEngine != null)
+            {
                 stream.setExternalTransformer(transformEngine);
+            }
+
+            logger.info(Logger.Category.STATISTICS,
+                        "create_stream," + getLoggingId());
 
             /*
              * The attribute rtp-level-relay-type specifies the
@@ -1027,11 +1059,9 @@ public class RtpChannel
 
         if (logger.isTraceEnabled())
         {
-            logger.trace(
-                    "Direction of channel " + getID() + " of content "
-                        + content.getName() + " of conference "
-                        + conference.getID() + " is "
-                        + stream.getDirection() + ".");
+            logger.debug(Logger.Category.STATISTICS,
+                       "ch_direction," + getLoggingId()
+                        + " direction=" + stream.getDirection());
         }
     }
 
@@ -1373,7 +1403,6 @@ public class RtpChannel
                 }
 
                 rtxPayloadType = -1;
-                redPayloadType = -1;
                 for (PayloadTypePacketExtension ext : payloadTypes)
                 {
                     if (Constants.RTX.equalsIgnoreCase(ext.getName()))
@@ -1386,11 +1415,6 @@ public class RtpChannel
                                         = Byte.valueOf(ppe.getValue());
 
                         }
-                    }
-
-                    if (Constants.RED.equalsIgnoreCase(ext.getName()))
-                    {
-                        redPayloadType = (byte) ext.getID();
                     }
                 }
 
@@ -1735,6 +1759,7 @@ public class RtpChannel
                 catch (SizeExceededException see)
                 {
                     // Never thrown with checkLimit=false.
+                    logger.error( "An unexpected exception occurred.", see );
                 }
             }
         }
@@ -1870,6 +1895,18 @@ public class RtpChannel
                 // Check for payload.
                 conferenceStatistics.totalNoPayloadChannels.incrementAndGet();
             }
+
+            logger.info(Logger.Category.STATISTICS,
+                        "expire_ch_stats," + getLoggingId() +
+                            " bRecv=" + statistics.bytesReceived +
+                            ",bSent=" + statistics.bytesSent +
+                            ",pRecv=" + statistics.packetsReceived +
+                            ",pSent=" + statistics.packetsSent +
+                            ",bRetr=" + statistics.bytesRetransmitted +
+                            ",bNotRetr=" + statistics.bytesNotRetransmitted +
+                            ",pRetr=" + statistics.packetsRetransmitted +
+                            ",pNotRetr=" + statistics.packetsNotRetransmitted +
+                            ",pMiss=" + statistics.packetsMissingFromCache);
         }
         TransformEngine transformEngine = this.transformEngine;
         if (transformEngine != null)
@@ -1908,17 +1945,6 @@ public class RtpChannel
     public byte getRtxAssociatedPayloadType()
     {
         return rtxAssociatedPayloadType;
-    }
-
-    /**
-     * Returns the payload type number for the RED payload type (RFC-2198) for
-     * this channel.
-     * @return the payload type number for the RED payload type (RFC-2198) for
-     * this channel.
-     */
-    public byte getRedPayloadType()
-    {
-        return redPayloadType;
     }
 
     /**
@@ -1991,10 +2017,212 @@ public class RtpChannel
         return this.transformEngine;
     }
 
+    /**
+     * Creates the {@code MediaStreamTrack}s from signaling and adds them to the
+     * {@code MediaStream} that is associated to this {@code RtpChannel}.
+     *
+     * @param sources  The <tt>List</tt> of <tt>SourcePacketExtension</tt> that
+     * describes the list of sources of this <tt>RtpChannel</tt> and that is
+     * used as the input in the update of the Sets the <tt>Set</tt> of the SSRCs
+     * that this <tt>RtpChannel</tt> has signaled.
+     * @param sourceGroups
+     */
+    public void setMediaStreamTracks(
+        List<SourcePacketExtension> sources,
+        List<SourceGroupPacketExtension> sourceGroups)
+    {
+        boolean hasSources = sources != null && !sources.isEmpty();
+        boolean hasGroups = sourceGroups != null && !sourceGroups.isEmpty();
+        if (!hasSources && !hasGroups)
+        {
+            return;
+        }
+
+        this.setSources(sources); // TODO remove and rely on MSTs.
+        this.setSourceGroups(sourceGroups); // TODO remove and rely on MSTs.
+
+        Map<Long, MediaStreamTrack> tracks = new TreeMap<>();
+        if (hasGroups)
+        {
+            List<SourceGroupPacketExtension> simGroups = new ArrayList<>();
+            Map<Long, Long> rtxPairs = new TreeMap<>();
+
+            for (SourceGroupPacketExtension sg : sourceGroups)
+            {
+                List<SourcePacketExtension> groupSources = sg.getSources();
+                if (groupSources == null || groupSources.isEmpty())
+                {
+                    continue;
+                }
+
+                if ("sim".equalsIgnoreCase(sg.getSemantics())
+                    && groupSources.size() >= 2)
+                {
+                    simGroups.add(sg);
+                }
+                else if ("fid".equalsIgnoreCase(sg.getSemantics())
+                    && groupSources.size() == 2)
+                {
+                    rtxPairs.put(
+                        groupSources.get(0).getSSRC(),
+                        groupSources.get(1).getSSRC());
+                }
+            }
+
+            if (!simGroups.isEmpty())
+            {
+                for (SourceGroupPacketExtension simGroup : simGroups)
+                {
+                    MediaStreamTrack track = new MediaStreamTrack();
+
+                    int order = RTPEncoding.BASE_ORDER;
+                    for (SourcePacketExtension spe : simGroup.getSources())
+                    {
+                        Long primarySSRC = spe.getSSRC();
+                        Long rtxSSRC = rtxPairs.remove(primarySSRC);
+                        if (rtxSSRC != null)
+                        {
+                            track.addEncoding(primarySSRC, rtxSSRC, -1, order);
+                            tracks.put(primarySSRC, track);
+                            tracks.put(rtxSSRC, track);
+                        }
+                        else
+                        {
+                            track.addEncoding(primarySSRC, -1, -1, order);
+                            tracks.put(primarySSRC, track);
+                        }
+
+                        order++;
+                    }
+                }
+            }
+
+            if (!rtxPairs.isEmpty())
+            {
+                for (Map.Entry<Long, Long> fidEntry : rtxPairs.entrySet())
+                {
+                    MediaStreamTrack track = new MediaStreamTrack();
+                    Long primarySSRC = fidEntry.getKey();
+                    Long rtxSSRC = fidEntry.getValue();
+
+                    track.addEncoding(
+                        primarySSRC, rtxSSRC, -1, RTPEncoding.BASE_ORDER);
+                }
+            }
+        }
+
+        Map<Long, MediaStreamTrack> remoteTracks = stream.getRemoteTracks();
+        synchronized (remoteTracks)
+        {
+            remoteTracks.clear();
+            remoteTracks.putAll(tracks);
+
+            if (hasSources)
+            {
+                for (SourcePacketExtension spe : sources)
+                {
+                    long mediaSSRC = spe.getSSRC();
+                    if (remoteTracks.get(mediaSSRC) != null)
+                    {
+                        continue;
+                    }
+
+                    MediaStreamTrack mst = new MediaStreamTrack();
+                    mst.addEncoding(mediaSSRC, -1, -1, RTPEncoding.BASE_ORDER);
+                    remoteTracks.put(mediaSSRC, mst);
+                }
+            }
+        }
+    }
+
+    /**
+     * @return a string which identifies this {@link RtpChannel} for the
+     * purposes of logging (i.e. includes the ID of the channel, the ID of its
+     * conference and potentially other information). The string is a
+     * comma-separated list of "key=value" pairs.
+     */
+    @Override
+    public String getLoggingId()
+    {
+        return RtpChannel.getLoggingId(this);
+    }
+
+    /**
+     * @return a string which identifies a specific {@link RtpChannel} for the
+     * purposes of logging (i.e. includes the ID of the channel, the ID of its
+     * conference and potentially other information). The string is a
+     * comma-separated list of "key=value" pairs.
+     * @param rtpChannel The {@link RtpChannel} for which to return a string.
+     */
+    public static String getLoggingId(RtpChannel rtpChannel)
+    {
+        String channelId = Channel.getLoggingId(rtpChannel);
+        MediaStream stream = rtpChannel == null ? null : rtpChannel.getStream();
+        return channelId +
+            ",stream=" + (stream == null ? "null" : stream.hashCode());
+    }
 
     /**
      * An exception indicating that the maximum size of something was exceeded.
      */
     private static class SizeExceededException extends Exception
     {}
+
+    /**
+     * Holds statistics for an {@link RtpChannel}.
+     */
+    protected class Statistics
+    {
+        /**
+         * Number of bytes sent. Only updated when the {@link MediaStream} is
+         * closed.
+         */
+        protected long bytesSent = -1;
+
+        /**
+         * Number of bytes received. Only updated when the {@link MediaStream}
+         * is closed.
+         */
+        protected long bytesReceived = -1;
+
+        /**
+         * Number of packets sent. Only updated when the {@link MediaStream} is
+         * closed.
+         */
+        protected long packetsSent = -1;
+
+        /**
+         * Number of packets received. Only updated when the {@link MediaStream}
+         * is closed.
+         */
+        protected long packetsReceived = -1;
+
+        /**
+         * Number of bytes retransmitted.
+         */
+        protected final AtomicLong bytesRetransmitted = new AtomicLong();
+
+        /**
+         * Number of bytes for packets which were requested and found in the
+         * cache, but were intentionally not retransmitted.
+         */
+        protected final AtomicLong bytesNotRetransmitted = new AtomicLong();
+
+        /**
+         * Number of packets retransmitted.
+         */
+        protected final AtomicLong packetsRetransmitted = new AtomicLong();
+
+        /**
+         * Number of packets which were requested and found in the cache, but
+         * were intentionally not retransmitted.
+         */
+        protected AtomicLong packetsNotRetransmitted = new AtomicLong();
+
+        /**
+         * The number of packets for which retransmission was requested, but
+         * they were missing from the cache.
+         */
+        protected AtomicLong packetsMissingFromCache = new AtomicLong();
+    }
 }

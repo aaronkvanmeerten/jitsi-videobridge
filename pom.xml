@@ -31,7 +31,7 @@
     <dependency>
       <groupId>io.callstats</groupId>
       <artifactId>callstats-java-sdk</artifactId>
-      <version>3.2.0</version>
+      <version>4.1.1</version>
     </dependency>
     <dependency>
       <groupId>com.googlecode.json-simple</groupId>
@@ -69,17 +69,17 @@
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>fmj</artifactId>
-      <version>1.0-20160624.153910-20</version>
+      <version>1.0-20161207.221530-23</version>
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>ice4j</artifactId>
-      <version>1.1-20160906.210544-18</version>
+      <version>2.0-20161221.230043-4</version>
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>jicoco</artifactId>
-      <version>1.0-20160822.191856-34</version>
+      <version>1.0-20161122.205032-37</version>
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>
@@ -150,7 +150,7 @@
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>libjitsi</artifactId>
-      <version>1.0-20160921.232657-191</version>
+      <version>1.0-20170103.172738-216</version>
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>
@@ -164,6 +164,16 @@
     <dependency>
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-jdk14</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>osgi-over-slf4j</artifactId>
+      <version>${slf4j.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>jul-to-slf4j</artifactId>
+      <version>${slf4j.version}</version>
     </dependency>
     <dependency>
       <groupId>xpp3</groupId>

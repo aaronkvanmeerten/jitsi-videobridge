@@ -154,7 +154,7 @@ public abstract class Channel
      * Transport packet extension namespace used by {@link #transportManager}.
      * Indicates whether ICE or RAW transport is used by this channel.
      */
-    private final String transportNamespace;
+    protected final String transportNamespace;
 
     /**
      * The <tt>Object</tt> which synchronizes the access to
@@ -428,16 +428,11 @@ public abstract class Channel
                     throw (ThreadDeath) t;
             }
 
-            Videobridge videobridge = conference.getVideobridge();
-
             if (logger.isInfoEnabled())
             {
 
-                logger.info(
-                        "Expired channel " + getID() + " of content "
-                            + content.getName() + " of conference "
-                            + conference.getID() + ". "
-                            + videobridge.getConferenceCountString());
+                logger.info(Logger.Category.STATISTICS,
+                            "expire_ch," + getLoggingId());
             }
         }
 
@@ -684,13 +679,13 @@ public abstract class Channel
     }
 
     /**
-     * Sets the identifier of the endpoint of the conference participant
+     * Sets the identifier of the newEndpointId of the conference participant
      * associated with this <tt>Channel</tt>.
      *
-     * @param endpoint the identifier of the endpoint of the conference
+     * @param newEndpointId the identifier of the newEndpointId of the conference
      * participant associated with this <tt>Channel</tt>
      */
-    public void setEndpoint(String endpoint)
+    public void setEndpoint(String newEndpointId)
     {
         try
         {
@@ -699,28 +694,38 @@ public abstract class Channel
             // Is the endpoint really changing?
             if (oldValue == null)
             {
-                if (endpoint == null)
+                if (newEndpointId == null)
                     return;
             }
-            else if (oldValue.getID().equals(endpoint))
+            else if (oldValue.getID().equals(newEndpointId))
             {
                 return;
             }
 
             // The endpoint is really changing.
             Endpoint newValue
-                = getContent().getConference().getOrCreateEndpoint(endpoint);
-
-            if (oldValue != newValue)
-            {
-                this.endpoint = newValue;
-
-                onEndpointChanged(oldValue, newValue);
-            }
+                = getContent().getConference()
+                        .getOrCreateEndpoint(newEndpointId);
+            setEndpoint(newValue);
         }
         finally
         {
             touch(); // It seems this Channel is still active.
+        }
+    }
+
+    /**
+     * Sets the {@link Endpoint} of this {@link Channel} to a particular
+     * instance.
+     * @param endpoint the new {@link Endpoint} instance.
+     */
+    public void setEndpoint(Endpoint endpoint)
+    {
+        Endpoint oldEndpoint = this.endpoint;
+        if (oldEndpoint != endpoint)
+        {
+            this.endpoint = endpoint;
+            onEndpointChanged(oldEndpoint, endpoint);
         }
     }
 
@@ -826,8 +831,10 @@ public abstract class Channel
         {
             case PAYLOAD:
                 lastPayloadActivityTime.increase(now);
+                // fall-through
             case TRANSPORT:
                 lastTransportActivityTime.increase(now);
+                // fall-through
             default:
                 lastActivityTime.increase(now);
         }
@@ -879,10 +886,8 @@ public abstract class Channel
      */
     void transportConnected()
     {
-        logger.info("Transport connected for channel " + getID()
-                            + " of content " + getContent().getName()
-                            + " of conference "
-                            + getContent().getConference().getID());
+        logger.info(Logger.Category.STATISTICS,
+                    "transport_connected," + getLoggingId());
 
         // It seems this Channel is still active.
         touch(ActivityType.TRANSPORT /* transport connected */);
@@ -907,5 +912,36 @@ public abstract class Channel
     public String getChannelBundleId()
     {
         return channelBundleId;
+    }
+
+    /**
+     * @return a string which identifies this{@link Channel} for the purposes
+     * of logging (i.e. includes the ID of the channel, the ID of its
+     * conference and potentially other information). The string is a
+     * comma-separated list of "key=value" pairs.
+     */
+    public String getLoggingId()
+    {
+        return getLoggingId(this);
+    }
+
+    /**
+     * @return a string which identifies a specific {@link Channel} for the
+     * purposes of logging (i.e. includes the ID of the channel, the ID of its
+     * conference and potentially other information). The string is a
+     * comma-separated list of "key=value" pairs.
+     * @param channel The channel for which to return a string.
+     */
+    public static String getLoggingId(Channel channel)
+    {
+        String id = channel == null ? "null" : channel.getID();
+        Content content
+            = channel == null ? null : channel.getContent();
+        Endpoint endpoint
+            = channel == null ? null : channel.getEndpoint();
+
+        return Content.getLoggingId(content)
+            + ",ch_id=" + id
+            + ",endp_id=" + (endpoint == null ? "null" : endpoint.getID());
     }
 }

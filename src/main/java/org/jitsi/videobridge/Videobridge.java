@@ -62,7 +62,7 @@ public class Videobridge
      * options passed as the second argument to
      * {@link #handleColibriConferenceIQ(ColibriConferenceIQ, int)}.
      */
-    private static final String DEFAULT_OPTIONS_PROPERTY_NAME
+    public static final String DEFAULT_OPTIONS_PROPERTY_NAME
         = "org.jitsi.videobridge.defaultOptions";
 
     /**
@@ -75,7 +75,7 @@ public class Videobridge
     * The name of the property which specifies the path to the directory in
     * which media recordings will be stored.
     */
-    static final String ENABLE_MEDIA_RECORDING_PNAME
+    public static final String ENABLE_MEDIA_RECORDING_PNAME
         = "org.jitsi.videobridge.ENABLE_MEDIA_RECORDING";
 
     /**
@@ -88,14 +88,14 @@ public class Videobridge
      * The name of the property which controls whether media recording is
      * enabled.
      */
-    static final String MEDIA_RECORDING_PATH_PNAME
+    public static final String MEDIA_RECORDING_PATH_PNAME
         = "org.jitsi.videobridge.MEDIA_RECORDING_PATH";
 
     /**
      * The name of the property which specifies the token used to authenticate
      * requests to enable media recording.
      */
-    static final String MEDIA_RECORDING_TOKEN_PNAME
+    public static final String MEDIA_RECORDING_TOKEN_PNAME
         = "org.jitsi.videobridge.MEDIA_RECORDING_TOKEN";
 
     /**
@@ -138,7 +138,7 @@ public class Videobridge
      * shutdown mode. For XMPP API this is "from" JID. In case of REST
      * the source IP is being copied into the "from" field of the IQ.
      */
-    static final String SHUTDOWN_ALLOWED_SOURCE_REGEXP_PNAME
+    public static final String SHUTDOWN_ALLOWED_SOURCE_REGEXP_PNAME
         = "org.jitsi.videobridge.shutdown.ALLOWED_SOURCE_REGEXP";
 
     /**
@@ -146,7 +146,7 @@ public class Videobridge
      * For XMPP API this is "from" JID. In case of REST the source IP is being
      * copied into the "from" field of the IQ.
      */
-    static final String AUTHORIZED_SOURCE_REGEXP_PNAME
+    public static final String AUTHORIZED_SOURCE_REGEXP_PNAME
         = "org.jitsi.videobridge.AUTHORIZED_SOURCE_REGEXP";
 
     /**
@@ -282,15 +282,16 @@ public class Videobridge
         }
         while (conference == null);
 
-        // The method Videobridge.getChannelCount() should better be executed
-        // outside synchronized blocks in order to reduce the risks of causing
-        // deadlocks.
+        // The method Videobridge.getConferenceCountString() should better
+        // be executed outside synchronized blocks in order to reduce the
+        // risks of causing deadlocks.
         if (logger.isInfoEnabled())
         {
-            logger.info(
-                    "Created conference " + conference.getID()
-                        + " (enableLogging=" + enableLogging + "). "
-                        + getConferenceCountString());
+            logger.info(Logger.Category.STATISTICS,
+                        "create_conf," + conference.getLoggingId()
+                        + " conf_name=" + name
+                        + ",logging=" + enableLogging
+                        + "," + getConferenceCountString());
         }
 
         return conference;
@@ -901,7 +902,7 @@ public class Videobridge
 
                 if (initiator != null)
                 {
-                    channel.setInitiator(initiator); 
+                    channel.setInitiator(initiator);
                 }
                 else
                 {
@@ -914,9 +915,8 @@ public class Videobridge
 
                 channel.setDirection(channelIQ.getDirection());
 
-                channel.setSources(channelIQ.getSources());
-
-                channel.setSourceGroups(channelIQ.getSourceGroups());
+                channel.setMediaStreamTracks(
+                    channelIQ.getSources(), channelIQ.getSourceGroups());
 
                 if (channel instanceof VideoChannel)
                 {
@@ -932,8 +932,8 @@ public class Videobridge
                 {
                     TransportManager transportManager
                         = conference.getTransportManager(
-                            channelBundleId, 
-                            true, 
+                            channelBundleId,
+                            true,
                             initiator);
 
                     transportManager.addChannel(channel);
@@ -1485,6 +1485,33 @@ public class Videobridge
                         System.setProperty(propertyName, propertyValue);
                 }
             }
+
+            // These properties are moved to ice4j. This is to make sure that we
+            // still support the old names.
+            String oldPrefix = "org.jitsi.videobridge";
+            String newPrefix = "org.ice4j.ice.harvest";
+            for (String propertyName : new String[]{
+                HarvesterConfiguration.NAT_HARVESTER_LOCAL_ADDRESS,
+                HarvesterConfiguration.NAT_HARVESTER_PUBLIC_ADDRESS,
+                HarvesterConfiguration.DISABLE_AWS_HARVESTER,
+                HarvesterConfiguration.FORCE_AWS_HARVESTER,
+                HarvesterConfiguration.STUN_MAPPING_HARVESTER_ADDRESSES})
+            {
+                String propertyValue = cfg.getString(propertyName);
+
+                if (propertyValue != null)
+                {
+                    String newPropertyName
+                        = newPrefix
+                                + propertyName.substring(oldPrefix.length());
+                    System.setProperty(newPropertyName, propertyValue);
+                }
+            }
+
+            boolean enableLipSync
+                = cfg.getBoolean(Endpoint.ENABLE_LIPSYNC_HACK_PNAME, true);
+            System.setProperty(VideoChannel.ENABLE_LIPSYNC_HACK_PNAME,
+                Boolean.toString(enableLipSync));
         }
 
         // Initialize the the host candidate interface filters in the ice4j
@@ -1500,6 +1527,17 @@ public class Videobridge
                         + " initialization.",
                     e);
         }
+
+        // Start the initialization of the mapping candidate harvesters.
+        // Asynchronous, because the AWS and STUN harvester may take a long
+        // time to initialize.
+        new Thread()
+        {
+            public void run()
+            {
+                MappingCandidateHarvesters.initialize();
+            }
+        }.start();
     }
 
     /**
@@ -1579,10 +1617,10 @@ public class Videobridge
     {
         int[] metrics = getConferenceChannelAndStreamCount();
 
-        StringBuilder sb
-            = new StringBuilder("The total number of conferences is now ");
-        sb.append(metrics[0]).append(", channels ").append(metrics[1]);
-        sb.append(", video streams ").append(metrics[2]).append(".");
+        StringBuilder sb = new StringBuilder();
+        sb.append("conf_count=").append(metrics[0])
+            .append(",ch_count=").append(metrics[1])
+            .append(",v_streams=").append(metrics[2]);
 
         return sb.toString();
     }
@@ -1693,5 +1731,17 @@ public class Videobridge
          * successfully connected over TCP.
          */
         public AtomicInteger totalTcpTransportManagers = new AtomicInteger();
+
+        /**
+         * The total number of messages received from the data channels of
+         * the {@link Endpoint}s of this conference.
+         */
+        public AtomicLong totalDataChannelMessagesReceived = new AtomicLong();
+
+        /**
+         * The total number of messages sent via the data channels of the
+         * {@link Endpoint}s of this conference.
+         */
+        public AtomicLong totalDataChannelMessagesSent = new AtomicLong();
     }
 }

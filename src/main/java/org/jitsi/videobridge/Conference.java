@@ -17,7 +17,6 @@ package org.jitsi.videobridge;
 
 import java.beans.*;
 import java.io.*;
-import java.lang.ref.*;
 import java.lang.reflect.*;
 import java.text.*;
 import java.util.*;
@@ -108,6 +107,11 @@ public class Conference
     private final String id;
 
     /**
+     * The string used to identify this conference for the purposes of logging.
+     */
+    private final String loggingId;
+
+    /**
      * The world readable name of this instance if any.
      */
     private String name;
@@ -177,7 +181,7 @@ public class Conference
     /**
      * Holds conference statistics.
      */
-    private Statistics statistics = new Statistics();
+    private final Statistics statistics = new Statistics();
 
     /**
      * The <tt>WebRtcpDataStreamListener</tt> which listens to the
@@ -245,6 +249,7 @@ public class Conference
 
         this.videobridge = videobridge;
         this.id = id;
+        this.loggingId = "conf_id=" + id;
         this.focus = focus;
         this.eventAdmin = enableLogging ? videobridge.getEventAdmin() : null;
         this.includeInStatistics = enableLogging;
@@ -294,8 +299,9 @@ public class Conference
      * a message originating from the bridge and being sent to all endpoints in
      * the call, for that see broadcastMessageOnDataChannels below
      *
-     * @param msg
-     * @param endpoints
+     * @param msg the message to be sent
+     * @param endpoints the list of <tt>Endpoint</tt>s to which the message will
+     * be sent.
      */
     public void sendMessageOnDataChannels(String msg, List<Endpoint> endpoints)
     {
@@ -307,7 +313,9 @@ public class Conference
             }
             catch (IOException e)
             {
-                logger.error("Failed to send message on data channel.", e);
+                logger.error(
+                    "Failed to send message on data channel to: "
+                        + endpoint.getID() + ", msg: " + msg, e);
             }
         }
     }
@@ -537,12 +545,11 @@ public class Conference
 
         if (logger.isInfoEnabled())
         {
-            logger.info("The dominant speaker in conference " + getID()
-                            + " is now the endpoint "
-                            + ((dominantSpeaker == null)
-                ? "(null)"
-                : dominantSpeaker.getID())
-                            + ".");
+            String id
+                = dominantSpeaker == null ? "null" : dominantSpeaker.getID();
+            logger.info(Logger.Category.STATISTICS,
+                        "ds_change," + getLoggingId()
+                        + " ds_id=" + id);
         }
 
         if (dominantSpeaker != null)
@@ -761,25 +768,23 @@ public class Conference
             int[] metrics
                 = videobridge.getConferenceChannelAndStreamCount();
 
-            logger.info(
-                "Expired conference id=" + getID()
-                    + ", duration=" + durationSeconds + "s; "
-                    + "conferenceCount="
-                    + metrics[0]
-                    + ", channelCount="
-                    + metrics[1]
-                    + ", video streams="
-                    + metrics[2]
-                    + ", totalConferencesCompleted="
-                    + videobridgeStatistics.totalConferencesCompleted
-                    + ", totalNoPayloadChannels="
-                    + videobridgeStatistics.totalNoPayloadChannels
-                    + ", totalNoTransportChannels="
-                    + videobridgeStatistics.totalNoTransportChannels
-                    + ", totalChannels="
-                    + videobridgeStatistics.totalChannels
-                    + ", hasFailed=" + hasFailed
-                    + ", hasPartiallyFailed=" + hasPartiallyFailed);
+            StringBuilder sb = new StringBuilder("expire_conf,");
+            sb.append(getLoggingId())
+                .append(" duration=").append(durationSeconds)
+                .append(",conf_count=").append(metrics[0])
+                .append(",ch_count=").append(metrics[1])
+                .append(",v_streams=").append(metrics[2])
+                .append(",conf_completed=")
+                    .append(videobridgeStatistics.totalConferencesCompleted)
+                .append(",no_payload_ch=")
+                    .append(videobridgeStatistics.totalNoPayloadChannels)
+                .append(",no_transport_ch=")
+                    .append(videobridgeStatistics.totalNoTransportChannels)
+                .append(",total_ch=")
+                    .append(videobridgeStatistics.totalChannels)
+                .append(",has_failed=").append(hasFailed)
+                .append(",has_partially_failed=").append(hasPartiallyFailed);
+            logger.info(Logger.Category.STATISTICS, sb.toString());
         }
     }
 
@@ -1140,9 +1145,9 @@ public class Conference
              */
             Videobridge videobridge = getVideobridge();
 
-            logger.info(
-                    "Created content " + name + " of conference " + getID()
-                        + ". " + videobridge.getConferenceCountString());
+            logger.info(Logger.Category.STATISTICS,
+                        "create_content," + content.getLoggingId()
+                            + " " + videobridge.getConferenceCountString());
         }
 
         return content;
@@ -1186,7 +1191,9 @@ public class Conference
                 t = e;
             }
             if (t !=  null)
+            {
                 logger.warn("Could not create RecorderEventHandler. " + t);
+            }
         }
         return recorderEventHandler;
     }
@@ -1310,9 +1317,12 @@ public class Conference
                     throw new UndeclaredThrowableException(ioe);
                 }
                 transportManagers.put(channelBundleId, transportManager);
-                logger.info("Created an ICE agent with local ufrag "
-                                + transportManager.getLocalUfrag()
-                                + " for endpoint " + channelBundleId + ". Is initiator: " + initiator + ".");
+
+                logger.info(Logger.Category.STATISTICS,
+                            "create_ice_tm," + getLoggingId()
+                            + " ufrag=" + transportManager.getLocalUfrag()
+                            + ",bundle=" + channelBundleId
+                            + ",initiator=" + initiator);
             }
         }
 
@@ -1500,7 +1510,9 @@ public class Conference
                     }
                     catch (IOException e)
                     {
-                        logger.error("Failed to send message on data channel.",
+                        logger.error(
+                                "Failed to send dominant speaker update"
+                                    + " on data channel to " + endpoint.getID(),
                                 e);
                     }
                 }
@@ -1678,7 +1690,7 @@ public class Conference
      */
     private void speechActivityEndpointsChanged()
     {
-        List<Endpoint> endpoints = null;
+        List<Endpoint> endpoints;
 
         for (Content content : getContents())
         {
@@ -1736,6 +1748,7 @@ public class Conference
             // likely want to notify the Endpoints participating in this
             // Conference.
             dominantSpeakerChanged();
+            speechActivityEndpointsChanged();
         }
         else if (ConferenceSpeechActivity.ENDPOINTS_PROPERTY_NAME.equals(
                 propertyName))
@@ -1834,6 +1847,28 @@ public class Conference
     }
 
     /**
+     * @return a string which identifies this {@link Conference} for the
+     * purposes of logging. The string is a comma-separated list of "key=value"
+     * pairs.
+     */
+    public String getLoggingId()
+    {
+        return loggingId;
+    }
+
+    /**
+     * @return a string which identifies a specific {@link Conference} for the
+     * purposes of logging. The string is a comma-separated list of "key=value"
+     * pairs.
+     * @param conference The conference for which to return a string.
+     */
+    public static String getLoggingId(Conference conference)
+    {
+        return
+            (conference == null ? "conf_id=null" : conference.getLoggingId());
+    }
+
+    /**
      * Holds conference statistics.
      */
     class Statistics
@@ -1865,5 +1900,4 @@ public class Conference
          */
         AtomicInteger totalTcpTransportManagers = new AtomicInteger();
     }
-
 }

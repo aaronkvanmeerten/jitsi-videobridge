@@ -95,6 +95,11 @@ public class SimulcastSender
     private final Logger logger;
 
     /**
+     * Remembers whether we switched to the desired simulcast order.
+     */
+    private boolean retry = false;
+
+    /**
      * Ctor.
      *
      * @param simulcastSenderManager the <tt>SimulcastSender</tt> that owns this
@@ -252,10 +257,10 @@ public class SimulcastSender
     {
         String propertyName = ev.getPropertyName();
 
-        if (Endpoint.SELECTED_ENDPOINT_PROPERTY_NAME.equals(propertyName))
+        if (Endpoint.SELECTED_ENDPOINTS_PROPERTY_NAME.equals(propertyName))
         {
-            Set<Endpoint> oldEndpoints = (Set<Endpoint>) ev.getOldValue();
-            Set<Endpoint> newEndpoints = (Set<Endpoint>) ev.getNewValue();
+            Set<String> oldEndpoints = (Set<String>) ev.getOldValue();
+            Set<String> newEndpoints = (Set<String>) ev.getNewValue();
 
             selectedEndpointChanged(oldEndpoints, newEndpoints);
         }
@@ -286,24 +291,26 @@ public class SimulcastSender
      * @param newEndpoints Set of the new selected endpoints.
      */
     private void selectedEndpointChanged(
-            Set<Endpoint> oldEndpoints, Set<Endpoint> newEndpoints)
+            Set<String> oldEndpoints, Set<String> newEndpoints)
     {
         // Here we update the targetOrder value.
 
         if (logger.isDebugEnabled())
         {
             if (newEndpoints.isEmpty())
+            {
                 logger.debug("Now I'm not watching anybody. What?!");
+            }
             else
             {
-                StringBuilder newEndpointsIDList = new StringBuilder();
-                for (Endpoint e : newEndpoints)
+                StringBuilder sb = new StringBuilder("selected_endpoints,");
+                sb.append(getLoggingId()).append(" selected=");
+                for (String eId : newEndpoints)
                 {
-                    newEndpointsIDList.append(e.getID());
-                    newEndpointsIDList.append(", ");
+                    sb.append(eId);
+                    sb.append(";");
                 }
-                logger.debug(getReceiveEndpoint().getID() + " now I'm watching: "
-                        + newEndpointsIDList.toString());
+                logger.debug(Logger.Category.STATISTICS, sb.toString());
             }
         }
 
@@ -337,9 +344,9 @@ public class SimulcastSender
         int oldTargetOrder = targetOrder;
 
         boolean thisWasInTheSelectedEndpoints
-                = oldEndpoints.contains(sendEndpoint);
+                = oldEndpoints.contains(sendEndpoint.getID());
         boolean thisWillBeInTheSelectedEndpoints
-                = newEndpoints.contains(sendEndpoint);
+                = newEndpoints.contains(sendEndpoint.getID());
 
         if (thisWillBeInTheSelectedEndpoints)
         {
@@ -385,7 +392,7 @@ public class SimulcastSender
             SendMode sm = this.sendMode;
             if (sm != null)
             {
-                this.sendMode.receive(newTargetOrder);
+                retry = !this.sendMode.receive(newTargetOrder);
             }
         }
     }
@@ -413,6 +420,10 @@ public class SimulcastSender
         }
         else
         {
+            if (retry)
+            {
+                retry = !this.sendMode.receive(targetOrder);
+            }
             return sendMode.accept(pkt);
         }
     }
@@ -468,21 +479,38 @@ public class SimulcastSender
         {
             // Now, why would you want to do that?
             sendMode = null;
-            logger.debug("Setting simulcastMode to null.");
+            if (logger.isDebugEnabled())
+            {
+                logger.debug(Logger.Category.STATISTICS,
+                             "set_send_mode," + getLoggingId()
+                                 + " send_mode=null");
+            }
             return;
         }
         else if (newMode == SimulcastMode.REWRITING)
         {
-            logger.debug("Setting simulcastMode to rewriting mode.");
+            if (logger.isDebugEnabled())
+            {
+                logger.debug(Logger.Category.STATISTICS,
+                             "set_send_mode," + getLoggingId()
+                                 + " send_mode=" + SimulcastMode.REWRITING
+                                 .toString());
+            }
             sendMode = new RewritingSendMode(this);
         }
         else if (newMode == SimulcastMode.SWITCHING)
         {
-            logger.debug("Setting simulcastMode to switching mode.");
+            if (logger.isDebugEnabled())
+            {
+                logger.debug(Logger.Category.STATISTICS,
+                             "set_send_mode," + getLoggingId()
+                                 + " send_mode=" + SimulcastMode.SWITCHING
+                                 .toString());
+            }
             sendMode = new SwitchingSendMode(this);
         }
 
-        this.sendMode.receive(targetOrder);
+        retry = !this.sendMode.receive(targetOrder);
     }
 
     /**
@@ -571,7 +599,34 @@ public class SimulcastSender
                 return;
             }
 
-            sm.receive(targetOrder);
+            retry = !sm.receive(targetOrder);
         }
+    }
+
+    /**
+     * @return a string which identifies this {@link SimulcastSender} for the
+     * purposes of logging. The string is a comma-separated list of "key=value"
+     * pairs.
+     */
+    public String getLoggingId()
+    {
+        // The conference and endpoint IDs should be sufficient for debugging.
+        Endpoint receiveEndpoint = getReceiveEndpoint();
+        Endpoint sendEndpoint = getSendEndpoint();
+        Conference conference = null;
+        if (receiveEndpoint != null)
+        {
+            conference = receiveEndpoint.getConference();
+        }
+        else if (sendEndpoint != null)
+        {
+            conference = sendEndpoint.getConference();
+        }
+
+        return Conference.getLoggingId(conference)
+            + ",from_endp=" +
+                (receiveEndpoint == null ? "null" : receiveEndpoint.getID())
+            + ",to_endp="
+                + (sendEndpoint == null ? "null" : sendEndpoint.getID());
     }
 }
